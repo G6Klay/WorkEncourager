@@ -2,9 +2,12 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net9.0-windows</TargetFramework>
-    <!-- .NET 9 不在了也能继续用：自动使用机器上更新的大版本运行时 -->
-    <RollForward>Major</RollForward>
+    <!--
+      Win10 1607 起系统自带 4.6.2 或更新的 .NET Framework，朋友的电脑不用装任何运行时。
+      这也是 WebView2 包支持的最低版本。
+    -->
+    <TargetFramework>net462</TargetFramework>
+    <LangVersion>latest</LangVersion>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -14,31 +17,42 @@
     <Product>上班鼓励器</Product>
     <AssemblyTitle>上班鼓励器</AssemblyTitle>
     <ApplicationIcon>assets\app.ico</ApplicationIcon>
-    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>false</SelfContained>
-    <PublishSingleFile>true</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
     <DebugType>none</DebugType>
-    <PublishDir>dist\</PublishDir>
-    <PublishReferencesDocumentationFiles>false</PublishReferencesDocumentationFiles>
-    <!-- LibraryImport 的源生成器需要 -->
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- WebView2 包同时带了 WPF 程序集，这个程序只用 WinForms，版本冲突警告与运行无关 -->
-    <MSBuildWarningsAsMessages>$(MSBuildWarningsAsMessages);MSB3277</MSBuildWarningsAsMessages>
+    <!-- 不需要把 git 信息写进 exe，构建也就不依赖仓库配置 -->
+    <EnableSourceLink>false</EnableSourceLink>
+    <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <DefaultItemExcludes>$(DefaultItemExcludes);dist\**</DefaultItemExcludes>
+    <!-- Release 构建后只把一个 exe 复制到这里，所有依赖都内嵌在里面 -->
+    <DistDir Condition="'$(DistDir)' == ''">dist\</DistDir>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="src\**\*.cs" />
     <EmbeddedResource Include="web\**\*" LogicalName="web/%(Filename)%(Extension)" />
     <EmbeddedResource Include="assets\app.ico" LogicalName="app.ico" />
+    <Reference Include="System.Web.Extensions" />
+    <Using Remove="System.Net.Http" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" GeneratePathProperty="true" />
   </ItemGroup>
+
+  <!-- 内嵌 WebView2 依赖，见 src/EmbeddedDependencies.cs -->
+  <ItemGroup>
+    <EmbeddedResource Include="$(PkgMicrosoft_Web_WebView2)\lib\net462\Microsoft.Web.WebView2.Core.dll" LogicalName="deps/Microsoft.Web.WebView2.Core.dll" />
+    <EmbeddedResource Include="$(PkgMicrosoft_Web_WebView2)\lib\net462\Microsoft.Web.WebView2.WinForms.dll" LogicalName="deps/Microsoft.Web.WebView2.WinForms.dll" />
+    <EmbeddedResource Include="$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll" LogicalName="loader/x64/WebView2Loader.dll" />
+    <EmbeddedResource Include="$(PkgMicrosoft_Web_WebView2)\runtimes\win-x86\native\WebView2Loader.dll" LogicalName="loader/x86/WebView2Loader.dll" />
+    <EmbeddedResource Include="$(PkgMicrosoft_Web_WebView2)\runtimes\win-arm64\native\WebView2Loader.dll" LogicalName="loader/arm64/WebView2Loader.dll" />
+  </ItemGroup>
+
+  <Target Name="CopyExeToDist" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DistDir)" />
+  </Target>
 
 </Project>

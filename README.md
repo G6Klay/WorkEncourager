@@ -8,8 +8,10 @@
 dist/WorkEncourager.exe
 ```
 
-- 需要 .NET 9 或更新版本的桌面运行时，以及 WebView2 Runtime。Windows 11 自带 WebView2，这台电脑两者都有。
-- 数据保存在 `%LOCALAPPDATA%\WorkEncourager\data.json`，不联网。旁边的 `data.json.bak` 是上一次保存的备份。
+- 只有一个 exe，复制到哪里都能运行，不需要安装。发给别人时建议压缩成 zip。
+- 运行环境是 Windows 自带的 .NET Framework 4.6.2 或更新版本（Win10 1607 起系统自带），以及 WebView2 Runtime（Win11 自带，大多数 Win10 已通过 Edge 更新装好，缺少时程序会弹窗提示）。
+- exe 没有数字签名，Windows 可能提示“已保护你的电脑”，点“更多信息”再点“仍要运行”。
+- 数据保存在 `%LOCALAPPDATA%\WorkEncourager\data.json`，不联网。旁边的 `data.json.bak` 是上一次保存的备份。同目录的 `runtime` 里是启动时释放的 WebView2Loader.dll，`WebView2` 是界面的缓存。
 - 点小窗上的关闭按钮只是隐藏到托盘。要彻底退出，右键托盘图标选“退出”，或到“设置”里点“退出程序”。
 
 ## 规则
@@ -62,7 +64,7 @@ tests/          核心逻辑测试
 scripts/        运行测试、生成图标的脚本
 ```
 
-`web/` 里的文件编译时会嵌入 exe，修改后要重新发布才生效。
+`web/` 里的文件和 WebView2 的依赖编译时都会嵌入 exe（见 `src/EmbeddedDependencies.cs`），修改后要重新构建才生效。
 
 ## 开发
 
@@ -72,11 +74,13 @@ scripts/        运行测试、生成图标的脚本
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-tests.ps1
 ```
 
-发布到 `dist/`：
+构建并把 exe 复制到 `dist/`（需要 .NET SDK，运行时不需要）。`dist/` 里的 exe 正在运行时复制会失败，要先退出程序：
 
 ```bash
-dotnet publish WorkEncourager.csproj -c Release
+dotnet build WorkEncourager.csproj -c Release
 ```
+
+外壳的目标框架是 .NET Framework 4.6.2，所以 C# 代码不能用新版 .NET 才有的 API，比如 `System.Text.Json`、`Math.Clamp`。
 
 测试时把环境变量 `WORK_ENCOURAGER_DATA_DIR` 指向一个临时目录，就不会碰到正式数据，也能和正式程序同时运行。
 

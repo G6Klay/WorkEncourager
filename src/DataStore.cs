@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.Json;
 
 namespace WorkEncourager;
 
@@ -52,12 +51,11 @@ internal sealed class DataStore
         try
         {
             if (!File.Exists(_placementFile)) return null;
-            using var doc = JsonDocument.Parse(File.ReadAllText(_placementFile, Utf8));
-            var root = doc.RootElement;
-            return new WindowAnchor(new Point(root.GetProperty("x").GetInt32(), root.GetProperty("y").GetInt32()),
-                root.GetProperty("right").GetBoolean(), root.GetProperty("bottom").GetBoolean());
+            var root = Json.ParseObject(File.ReadAllText(_placementFile, Utf8));
+            return new WindowAnchor(new Point(Convert.ToInt32(root["x"]), Convert.ToInt32(root["y"])),
+                (bool)root["right"]!, (bool)root["bottom"]!);
         }
-        catch (Exception e) when (e is IOException or JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
+        catch (Exception e) when (e is IOException or ArgumentException or KeyNotFoundException or InvalidOperationException or InvalidCastException or FormatException or NullReferenceException)
         {
             return null;
         }
@@ -67,7 +65,7 @@ internal sealed class DataStore
     {
         try
         {
-            File.WriteAllText(_placementFile, JsonSerializer.Serialize(new { x = a.Point.X, y = a.Point.Y, right = a.Right, bottom = a.Bottom }), Utf8);
+            File.WriteAllText(_placementFile, Json.Serialize(new { x = a.Point.X, y = a.Point.Y, right = a.Right, bottom = a.Bottom }), Utf8);
         }
         catch (IOException)
         {
@@ -81,10 +79,9 @@ internal sealed class DataStore
         {
             if (!File.Exists(path)) return null;
             var text = File.ReadAllText(path, Utf8);
-            using var _ = JsonDocument.Parse(text);
-            return text;
+            return Json.IsValid(text) ? text : null;
         }
-        catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             return null;
         }

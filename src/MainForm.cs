@@ -1,5 +1,5 @@
 using System.Reflection;
-using System.Text.Json;
+using System.Runtime.InteropServices;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using Microsoft.Win32;
@@ -51,7 +51,7 @@ internal sealed class MainForm : Form
         _tray = BuildTray();
         _showWait = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) =>
         {
-            if (IsHandleCreated) BeginInvoke(ShowByUser);
+            if (IsHandleCreated) BeginInvoke((Action)ShowByUser);
         }, null, Timeout.Infinite, executeOnlyOnce: false);
         _fullscreenTimer.Tick += (_, _) => CheckFullscreen();
 
@@ -60,11 +60,6 @@ internal sealed class MainForm : Form
         NativeMethods.UseRoundedCorners(Handle);
         PlaceInitially();
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
-        DpiChanged += (_, _) =>
-        {
-            UpdateAnchor();
-            ApplySize(_cssSize);
-        };
         ResizeEnd += (_, _) =>
         {
             UpdateAnchor();
@@ -84,6 +79,21 @@ internal sealed class MainForm : Form
             cp.ClassStyle |= NativeMethods.CS_DROPSHADOW;
             return cp;
         }
+    }
+
+    /// <summary>窗口移到另一个缩放比例的屏幕时，按新屏幕的 DPI 调整大小。</summary>
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == NativeMethods.WM_DPICHANGED)
+        {
+            var r = (NativeMethods.NativeRect)Marshal.PtrToStructure(m.LParam, typeof(NativeMethods.NativeRect));
+            Bounds = Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
+            UpdateAnchor();
+            ApplySize(_cssSize);
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        base.WndProc(ref m);
     }
 
     protected override void SetVisibleCore(bool value)
@@ -240,7 +250,7 @@ internal sealed class MainForm : Form
     private void ApplySize(Size css)
     {
         _cssSize = css;
-        var scale = DeviceDpi / 96d;
+        var scale = NativeMethods.DpiOf(Handle) / 96d;
         var area = Screen.FromPoint(_anchor.Point).WorkingArea;
         var w = Math.Min((int)Math.Round(css.Width * scale), area.Width);
         var h = Math.Min((int)Math.Round(css.Height * scale), area.Height);
@@ -253,14 +263,14 @@ internal sealed class MainForm : Form
     private void ClampToScreen()
     {
         var area = Screen.FromRectangle(Bounds).WorkingArea;
-        var x = Math.Clamp(Bounds.X, area.Left, Math.Max(area.Left, area.Right - Bounds.Width));
-        var y = Math.Clamp(Bounds.Y, area.Top, Math.Max(area.Top, area.Bottom - Bounds.Height));
+        var x = Math.Max(area.Left, Math.Min(Bounds.X, area.Right - Bounds.Width));
+        var y = Math.Max(area.Top, Math.Min(Bounds.Y, area.Bottom - Bounds.Height));
         if (x != Bounds.X || y != Bounds.Y) Location = new Point(x, y);
     }
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
     {
-        if (IsHandleCreated) BeginInvoke(ClampToScreen);
+        if (IsHandleCreated) BeginInvoke((Action)ClampToScreen);
     }
 
     private void SetPinned(bool pinned)
@@ -274,7 +284,7 @@ internal sealed class MainForm : Form
     private void StartDrag()
     {
         NativeMethods.ReleaseCapture();
-        NativeMethods.SendMessage(Handle, NativeMethods.WM_NCLBUTTONDOWN, NativeMethods.HTCAPTION, 0);
+        NativeMethods.SendMessage(Handle, NativeMethods.WM_NCLBUTTONDOWN, new IntPtr(NativeMethods.HTCAPTION), IntPtr.Zero);
     }
 
     /* ---------- WebView2 ---------- */
@@ -300,11 +310,11 @@ internal sealed class MainForm : Form
                 if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessExited ||
                     e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)
                 {
-                    BeginInvoke(() => core.Reload());
+                    BeginInvoke((Action)core.Reload);
                 }
             };
 
-            var boot = JsonSerializer.Serialize(new
+            var boot = Json.Serialize(new
             {
                 data = _store.Load(),
                 autostart = Autostart.IsEnabled(),
@@ -368,7 +378,7 @@ internal sealed class MainForm : Form
 
     private void SendCommand(string name)
     {
-        _web.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "command", name }));
+        _web.CoreWebView2?.PostWebMessageAsJson(Json.Serialize(new { type = "command", name }));
     }
 
     private void OnWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -376,9 +386,8 @@ internal sealed class MainForm : Form
         if (!e.Source.StartsWith(Origin, StringComparison.Ordinal)) return;
         try
         {
-            using var doc = JsonDocument.Parse(e.WebMessageAsJson);
-            var msg = doc.RootElement;
-            switch (msg.GetProperty("type").GetString())
+            var msg = Json.ParseObject(e.WebMessageAsJson);
+            switch (msg["type"] as string)
             {
                 case "ready":
                     CheckFullscreen();
@@ -386,12 +395,12 @@ internal sealed class MainForm : Form
                     _fullscreenTimer.Start();
                     break;
                 case "save":
-                    _store.Save(msg.GetProperty("data").GetString() ?? "");
+                    _store.Save((string)msg["data"]!);
                     break;
                 case "window":
-                    SetPinned(msg.GetProperty("topmost").GetBoolean());
-                    _yieldEnabled = msg.GetProperty("yieldFullscreen").GetBoolean();
-                    ApplySize(new Size(msg.GetProperty("width").GetInt32(), msg.GetProperty("height").GetInt32()));
+                    SetPinned((bool)msg["topmost"]!);
+                    _yieldEnabled = (bool)msg["yieldFullscreen"]!;
+                    ApplySize(new Size(Convert.ToInt32(msg["width"]), Convert.ToInt32(msg["height"])));
                     break;
                 case "drag":
                     StartDrag();
@@ -406,26 +415,27 @@ internal sealed class MainForm : Form
                     Notify(msg);
                     break;
                 case "tooltip":
-                    var text = msg.GetProperty("text").GetString() ?? "";
-                    _tray.Text = text.Length > 127 ? text[..127] : text;
+                    // .NET Framework 的托盘提示最多 63 个字符，超过会抛异常。
+                    var text = (string)msg["text"]!;
+                    _tray.Text = text.Length > 63 ? text.Substring(0, 63) : text;
                     break;
                 case "autostart":
-                    SetAutostart(msg.GetProperty("enabled").GetBoolean());
+                    SetAutostart((bool)msg["enabled"]!);
                     break;
             }
         }
-        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is ArgumentException or KeyNotFoundException or InvalidOperationException or InvalidCastException or NullReferenceException or FormatException or IOException or UnauthorizedAccessException)
         {
             // 单条消息处理失败（比如存档被占用）不能让程序崩溃。把失败写进托盘提示，方便发现。
             _tray.ShowBalloonTip(5000, "上班鼓励器", $"操作失败：{ex.Message}", ToolTipIcon.Warning);
         }
     }
 
-    private void Notify(JsonElement msg)
+    private void Notify(Dictionary<string, object?> msg)
     {
-        var title = msg.GetProperty("title").GetString() ?? "上班鼓励器";
-        var body = msg.GetProperty("body").GetString() ?? "";
-        if (msg.TryGetProperty("popup", out var popup) && popup.GetBoolean())
+        var title = (string)msg["title"]!;
+        var body = (string)msg["body"]!;
+        if (msg.TryGetValue("popup", out var popup) && popup is true)
         {
             // 下班提醒要把托盘里的窗口叫出来。正在全屏时不打扰，等全屏结束再显示。
             _userHidden = false;
@@ -437,6 +447,6 @@ internal sealed class MainForm : Form
     private void SetAutostart(bool enabled)
     {
         Autostart.Set(enabled);
-        _web.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "autostart", enabled = Autostart.IsEnabled() }));
+        _web.CoreWebView2?.PostWebMessageAsJson(Json.Serialize(new { type = "autostart", enabled = Autostart.IsEnabled() }));
     }
 }

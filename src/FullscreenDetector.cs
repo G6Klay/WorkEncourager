@@ -9,10 +9,10 @@ internal static class FullscreenDetector
     /// 从最上层往下看窗口。之所以不只看前台窗口：焦点可能在别的屏幕或者远程控制的小面板上，
     /// 这时全屏程序仍然显示着，小窗不该跳出来挡住它。
     /// </summary>
-    public static bool IsActive(nint self)
+    public static bool IsActive(IntPtr self)
     {
         var screen = Screen.FromHandle(self).Bounds;
-        for (var h = NativeMethods.GetTopWindow(); h != 0; h = NativeMethods.GetNextWindow(h))
+        for (var h = NativeMethods.GetTopWindow(); h != IntPtr.Zero; h = NativeMethods.GetNextWindow(h))
         {
             if (h == self || !NativeMethods.IsWindowVisible(h) || NativeMethods.IsIconic(h) || NativeMethods.IsCloaked(h)) continue;
 

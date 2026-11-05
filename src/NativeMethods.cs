@@ -1,17 +1,19 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace WorkEncourager;
 
-internal static partial class NativeMethods
+internal static class NativeMethods
 {
     public const int WM_NCLBUTTONDOWN = 0x00A1;
+    public const int WM_DPICHANGED = 0x02E0;
     public const int HTCAPTION = 2;
     public const int CS_DROPSHADOW = 0x00020000;
 
     private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
     private const int DWMWCP_ROUND = 2;
-    private const nint HWND_TOPMOST = -1;
-    private const nint HWND_NOTOPMOST = -2;
+    private const int HWND_TOPMOST = -1;
+    private const int HWND_NOTOPMOST = -2;
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOACTIVATE = 0x0010;
@@ -27,83 +29,99 @@ internal static partial class NativeMethods
     public const long WS_EX_NOACTIVATE = 0x08000000;
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct NativeRect
+    public struct NativeRect
     {
         public int Left, Top, Right, Bottom;
     }
 
-    [LibraryImport("user32.dll")]
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool ReleaseCapture();
+    public static extern bool ReleaseCapture();
 
-    [LibraryImport("user32.dll", EntryPoint = "SendMessageW")]
-    public static partial nint SendMessage(nint hWnd, int msg, nint wParam, nint lParam);
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
-    [LibraryImport("dwmapi.dll")]
-    private static partial int DwmSetWindowAttribute(nint hwnd, int attribute, ref int value, int size);
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 
-    [LibraryImport("user32.dll")]
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
+    private static extern int DwmGetWindowAttributeInt(IntPtr hwnd, int attribute, out int value, int size);
+
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
 
-    [LibraryImport("user32.dll", EntryPoint = "GetTopWindow")]
-    private static partial nint GetTopWindowCore(nint hWnd);
+    [DllImport("user32.dll", EntryPoint = "GetTopWindow")]
+    private static extern IntPtr GetTopWindowCore(IntPtr hWnd);
 
-    [LibraryImport("user32.dll")]
-    private static partial nint GetWindow(nint hWnd, uint command);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hWnd, uint command);
 
-    [LibraryImport("user32.dll")]
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool IsWindowVisible(nint hWnd);
+    public static extern bool IsWindowVisible(IntPtr hWnd);
 
-    [LibraryImport("user32.dll")]
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool IsIconic(nint hWnd);
+    public static extern bool IsIconic(IntPtr hWnd);
 
-    [LibraryImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
-    private static partial nint GetWindowLongPtr(nint hWnd, int index);
+    // 样式只用低 32 位。GetWindowLongPtrW 在 32 位系统上不存在，所以用这个两边都有的版本。
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong(IntPtr hWnd, int index);
 
-    [LibraryImport("user32.dll", EntryPoint = "GetWindowRect")]
+    [DllImport("user32.dll", EntryPoint = "GetWindowRect")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool GetWindowRectCore(nint hWnd, out NativeRect rect);
+    private static extern bool GetWindowRectCore(IntPtr hWnd, out NativeRect rect);
 
-    [LibraryImport("user32.dll", EntryPoint = "GetClassNameW")]
-    private static unsafe partial int GetClassName(nint hWnd, char* name, int maxCount);
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder name, int maxCount);
 
-    [LibraryImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
-    private static partial int DwmGetWindowAttributeInt(nint hwnd, int attribute, out int value, int size);
+    [DllImport("user32.dll", EntryPoint = "GetDpiForWindow")]
+    private static extern uint GetDpiForWindowCore(IntPtr hWnd);
 
-    public static nint GetTopWindow() => GetTopWindowCore(0);
+    public static IntPtr GetTopWindow() => GetTopWindowCore(IntPtr.Zero);
 
-    public static nint GetNextWindow(nint hWnd) => GetWindow(hWnd, GW_HWNDNEXT);
+    public static IntPtr GetNextWindow(IntPtr hWnd) => GetWindow(hWnd, GW_HWNDNEXT);
 
-    public static long GetStyle(nint hWnd) => GetWindowLongPtr(hWnd, GWL_STYLE);
+    public static long GetStyle(IntPtr hWnd) => (uint)GetWindowLong(hWnd, GWL_STYLE);
 
-    public static long GetExStyle(nint hWnd) => GetWindowLongPtr(hWnd, GWL_EXSTYLE);
+    public static long GetExStyle(IntPtr hWnd) => (uint)GetWindowLong(hWnd, GWL_EXSTYLE);
 
-    public static Rectangle GetBounds(nint hWnd) =>
+    public static Rectangle GetBounds(IntPtr hWnd) =>
         GetWindowRectCore(hWnd, out var r) ? Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom) : Rectangle.Empty;
 
     /// <summary>被系统隐藏但仍标记为可见的窗口，比如其他虚拟桌面上的窗口和后台的商店应用。</summary>
-    public static bool IsCloaked(nint hWnd) =>
+    public static bool IsCloaked(IntPtr hWnd) =>
         DwmGetWindowAttributeInt(hWnd, DWMWA_CLOAKED, out var cloaked, sizeof(int)) == 0 && cloaked != 0;
 
-    public static unsafe string ClassNameOf(nint hWnd)
+    public static string ClassNameOf(IntPtr hWnd)
     {
-        const int capacity = 64;
-        var buffer = stackalloc char[capacity];
-        var length = GetClassName(hWnd, buffer, capacity);
-        return length > 0 ? new string(buffer, 0, length) : "";
+        var buffer = new StringBuilder(64);
+        return GetClassName(hWnd, buffer, buffer.Capacity) > 0 ? buffer.ToString() : "";
+    }
+
+    /// <summary>窗口当前的 DPI。旧系统没有这个 API 时按 100% 缩放处理。</summary>
+    public static int DpiOf(IntPtr hWnd)
+    {
+        try
+        {
+            var dpi = (int)GetDpiForWindowCore(hWnd);
+            return dpi > 0 ? dpi : 96;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return 96;
+        }
     }
 
     /// <summary>切换置顶但不激活窗口。Form.TopMost 的实现会激活窗口，抢走用户正在打字的焦点。</summary>
-    public static void SetTopMost(nint hwnd, bool topMost)
+    public static void SetTopMost(IntPtr hwnd, bool topMost)
     {
-        SetWindowPos(hwnd, topMost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(hwnd, new IntPtr(topMost ? HWND_TOPMOST : HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     /// <summary>无边框窗口默认是直角，这里请系统按 Win11 风格画圆角；旧系统不支持时忽略。</summary>
-    public static void UseRoundedCorners(nint hwnd)
+    public static void UseRoundedCorners(IntPtr hwnd)
     {
         var preference = DWMWCP_ROUND;
         _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref preference, sizeof(int));

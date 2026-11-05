@@ -8,7 +8,7 @@ internal static class Autostart
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "WorkEncourager";
 
-    private static string Command => $"\"{Environment.ProcessPath}\"";
+    private static string Command => $"\"{Application.ExecutablePath}\"";
 
     public static bool IsEnabled()
     {
