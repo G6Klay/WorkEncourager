@@ -1409,6 +1409,7 @@
         autostartRow),
       h('section', null,
         h('h3', null, '关于'),
+        h('p', { class: 'hint' }, '作者：GitHub G6Klay'),
         h('p', { class: 'hint' }, `版本 ${boot.version || '开发版'}。所有数据只保存在这台电脑上，不联网。`),
         boot.dataDir ? h('p', { class: 'hint' }, `数据位置：${boot.dataDir}`) : null,
         h('div', { class: 'cal-tools' }, h('button', { class: 'btn small', onclick: () => post({ type: 'quit' }) }, '退出程序'))));
