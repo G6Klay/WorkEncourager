@@ -1052,6 +1052,208 @@ test('读档：带标记和午休的存档读回来和原来一致', () => {
   eq(copy, s);
 });
 
+/* ---------- 任务 ---------- */
+test('任务回报：上班时段按时薪，午休不计', () => {
+  const s = makeLunch();
+  const p = C.intervalPay(s, at(2026, 11, 5, 11), at(2026, 11, 5, 14));
+  eq(p.paidSeconds, 2 * 3600);
+  near(p.earned, hourly8 * 2);
+});
+
+test('任务回报：下班后按加班费，加班不计薪时为 0', () => {
+  const s = makeLunch();
+  const p = C.intervalPay(s, at(2026, 11, 5, 17), at(2026, 11, 5, 19));
+  eq(p.paidSeconds, 2 * 3600);
+  near(p.earned, hourly8 + hourly8 * 1.5);
+  s.overtime.mode = 'none';
+  const q = C.intervalPay(s, at(2026, 11, 5, 17), at(2026, 11, 5, 19));
+  eq(q.paidSeconds, 3600);
+  near(q.earned, hourly8);
+});
+
+test('任务回报：休息日、请假和点了下班之后都不计', () => {
+  const s = makeLunch();
+  eq(C.intervalPay(s, at(2026, 11, 7, 10), at(2026, 11, 7, 12)).earned, 0);
+  s.leave.sick = 100;
+  C.applyBrush(s, nov5, brush('sick'), BASE);
+  eq(C.intervalPay(s, at(2026, 11, 5, 10), at(2026, 11, 5, 11)).earned, 0);
+  C.applyBrush(s, nov5, brush('sick'), BASE);
+  C.clockOut(s, at(2026, 11, 5, 16));
+  const p = C.intervalPay(s, at(2026, 11, 5, 15), at(2026, 11, 5, 17));
+  eq(p.paidSeconds, 3600);
+  near(p.earned, hourly8);
+});
+
+test('任务回报：夜班跨零点也能算', () => {
+  const s = make();
+  s.schedule.shifts[0] = { id: 'day', name: '夜班', start: '22:00', end: '06:00', breakStart: null, breakEnd: null };
+  const p = C.intervalPay(s, at(2026, 11, 5, 23), at(2026, 11, 6, 1));
+  eq(p.paidSeconds, 2 * 3600);
+  near(p.earned, (wage / 8) * 2);
+});
+
+test('任务计时：开始、暂停、继续，暂停期间不计入耗时', () => {
+  const s = makeLunch();
+  const t = C.addTask(s, { name: '写周报' }, BASE);
+  eq(t.status, 'planned');
+  C.startTask(s, t.id, at(2026, 11, 5, 9));
+  eq(C.taskStats(s, t, at(2026, 11, 5, 10)).seconds, 3600);
+  C.pauseTask(s, t.id, at(2026, 11, 5, 10));
+  eq(t.status, 'paused');
+  eq(C.taskStats(s, t, at(2026, 11, 5, 11)).seconds, 3600);
+  C.startTask(s, t.id, at(2026, 11, 5, 11));
+  const live = C.taskStats(s, t, at(2026, 11, 5, 11, 30));
+  eq(live.seconds, 5400);
+  near(live.earned, hourly8 * 1.5);
+});
+
+test('任务计时：同一时间只计一个，开始新任务会暂停旧任务', () => {
+  const s = makeLunch();
+  const a = C.addTask(s, { name: 'A' }, BASE);
+  const b = C.addTask(s, { name: 'B' }, BASE);
+  C.startTask(s, a.id, at(2026, 11, 5, 9));
+  C.startTask(s, b.id, at(2026, 11, 5, 10));
+  eq([a.status, b.status], ['paused', 'running']);
+  eq(C.taskStats(s, a, at(2026, 11, 5, 11)).seconds, 3600);
+  eq(C.runningTask(s).id, b.id);
+  C.pauseTask(s, b.id, at(2026, 11, 5, 11));
+  eq(C.activeTask(s).id, b.id);
+});
+
+test('任务结算：耗时含午休，回报不含；之后改工资不影响记录；可撤销', () => {
+  const s = makeLunch();
+  const t = C.addTask(s, { name: 'A' }, BASE);
+  C.startTask(s, t.id, at(2026, 11, 5, 11));
+  const done = C.finishTask(s, t.id, at(2026, 11, 5, 14));
+  eq(done.status, 'done');
+  eq(done.seconds, 3 * 3600);
+  eq(done.paidSeconds, 2 * 3600);
+  near(done.earned, hourly8 * 2);
+  s.salary.monthly = 1;
+  near(C.taskStats(s, done, at(2026, 11, 6, 9)).earned, hourly8 * 2);
+  eq(C.doneTasks(s, 2026, 10).length, 1);
+  eq(C.doneTasks(s, 2026, 11).length, 0);
+  C.reopenTask(s, t.id);
+  eq(t.status, 'paused');
+  eq(C.doneTasks(s, 2026, 10).length, 0);
+  eq(C.finishTask(s, 'nope', BASE), null);
+});
+
+test('任务：没填名称时自动起名，改名不能改成空', () => {
+  const s = make();
+  const t = C.addTask(s, { name: '  ' }, at(2026, 11, 5, 9, 5));
+  eq(t.name, '任务 11月5日 09:05');
+  C.updateTask(s, t.id, { name: '新名字' });
+  eq(t.name, '新名字');
+  C.updateTask(s, t.id, { name: '  ' });
+  eq(t.name, '新名字');
+});
+
+test('任务排序：预约的按时间在前，未预约的在后', () => {
+  const s = make();
+  C.addTask(s, { name: '无预约' }, BASE);
+  C.addTask(s, { name: '晚', scheduledStart: at(2026, 11, 5, 15) }, BASE);
+  C.addTask(s, { name: '早', scheduledStart: at(2026, 11, 5, 9) }, BASE);
+  eq(C.plannedTasks(s).map((t) => t.name), ['早', '晚', '无预约']);
+});
+
+test('预约提醒：到点提醒开始，只提醒一次，不会自动开始', () => {
+  const s = make();
+  const t = C.addTask(s, { name: 'A', scheduledStart: at(2026, 11, 5, 15) }, BASE);
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 14, 59, 59)).reminders.length, 0);
+  const r = C.dueTaskReminders(s, at(2026, 11, 5, 15));
+  eq(r.reminders.map((x) => x.kind), ['start']);
+  eq(r.changed, true);
+  eq(t.status, 'planned');
+  const again = C.dueTaskReminders(s, at(2026, 11, 5, 15, 1));
+  eq(again.reminders.length, 0);
+  eq(again.changed, false);
+});
+
+test('预约提醒：结束前 5 分钟和结束时各提醒一次', () => {
+  const s = make();
+  const t = C.addTask(s, { name: 'A', scheduledStart: at(2026, 11, 5, 15), scheduledEnd: at(2026, 11, 5, 16) }, BASE);
+  C.startTask(s, t.id, at(2026, 11, 5, 15));
+  C.dueTaskReminders(s, at(2026, 11, 5, 15));
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 15, 54, 59)).reminders.length, 0);
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 15, 55)).reminders.map((x) => x.kind), ['ending']);
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 15, 56)).reminders.length, 0);
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 16)).reminders.map((x) => x.kind), ['end']);
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 16, 1)).reminders.length, 0);
+  eq(t.status, 'running');
+});
+
+test('预约提醒：暂停中也提醒结束，没开始或已结算不提醒结束', () => {
+  const s = make();
+  const a = C.addTask(s, { name: 'A', scheduledEnd: at(2026, 11, 5, 16) }, BASE);
+  C.startTask(s, a.id, at(2026, 11, 5, 15));
+  C.pauseTask(s, a.id, at(2026, 11, 5, 15, 30));
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 16)).reminders.map((x) => x.kind), ['end']);
+  const b = C.addTask(s, { name: 'B', scheduledEnd: at(2026, 11, 5, 17) }, BASE);
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 17)).reminders.length, 0);
+  C.startTask(s, b.id, at(2026, 11, 5, 16, 30));
+  C.finishTask(s, b.id, at(2026, 11, 5, 16, 40));
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 17)).reminders.length, 0);
+});
+
+test('预约提醒：错过超过 1 小时不补提醒，改时间后重新提醒', () => {
+  const s = make();
+  const t = C.addTask(s, { name: 'A', scheduledStart: at(2026, 11, 5, 9) }, BASE);
+  const r = C.dueTaskReminders(s, at(2026, 11, 5, 12));
+  eq(r.reminders.length, 0);
+  eq(r.changed, true);
+  C.updateTask(s, t.id, { scheduledStart: at(2026, 11, 5, 15) });
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 15)).reminders.map((x) => x.kind), ['start']);
+});
+
+test('预约提醒：提前开始就不再提醒开始', () => {
+  const s = make();
+  const t = C.addTask(s, { name: 'A', scheduledStart: at(2026, 11, 5, 15) }, BASE);
+  C.startTask(s, t.id, at(2026, 11, 5, 14));
+  eq(C.dueTaskReminders(s, at(2026, 11, 5, 15)).reminders.length, 0);
+});
+
+test('读档：任务能原样读回，旧存档没有任务也能读', () => {
+  const s = makeLunch();
+  const a = C.addTask(s, { name: 'A', scheduledStart: at(2026, 11, 5, 9), scheduledEnd: at(2026, 11, 5, 10) }, BASE);
+  const b = C.addTask(s, { name: 'B' }, BASE);
+  C.startTask(s, a.id, at(2026, 11, 5, 9));
+  C.finishTask(s, a.id, at(2026, 11, 5, 10));
+  C.startTask(s, b.id, at(2026, 11, 5, 10));
+  s.ui.strip = 'task';
+  eq(C.normalizeState(JSON.parse(JSON.stringify(s)), BASE), s);
+  const old = JSON.parse(JSON.stringify(s));
+  delete old.tasks;
+  delete old.ui.strip;
+  const loaded = C.normalizeState(old, BASE);
+  eq(loaded.tasks, []);
+  eq(loaded.ui.strip, 'wish');
+});
+
+test('读档：非法任务被丢弃，状态和计时段被纠正', () => {
+  const now = at(2026, 11, 5, 12);
+  const s = C.normalizeState({
+    tasks: [
+      'junk',
+      { name: '没有 id' },
+      { id: 'a', name: 'x'.repeat(99), status: 'evil' },
+      { id: 'b', status: 'running', segments: [[1, null]] },
+      { id: 'c', status: 'running', segments: [[2, null]] },
+      { id: 'd', status: 'running', segments: [] },
+      { id: 'e', status: 'paused', segments: [[3, null], ['x', 1]] },
+      { id: 'f', status: 'done', segments: [] },
+    ],
+  }, now);
+  eq(s.tasks.map((t) => t.id), ['a', 'b', 'c', 'd', 'e', 'f']);
+  eq(s.tasks[0].status, 'planned');
+  eq(s.tasks[0].name.length, 40);
+  eq(s.tasks.filter((t) => t.status === 'running').map((t) => t.id), ['b']);
+  eq(s.tasks[2].segments, [[2, 2]]);
+  eq(s.tasks[3].status, 'planned');
+  eq(s.tasks[4].segments, [[3, 3]]);
+  eq(s.tasks[5].status, 'planned');
+});
+
 test('标记文字', () => {
   eq(C.markText({ type: 'sick', half: null }), '病假');
   eq(C.markText({ type: 'personal', half: 'am' }), '上午事假');

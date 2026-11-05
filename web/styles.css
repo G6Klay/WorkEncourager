@@ -245,6 +245,50 @@ body.keyboard :focus-visible {
 
 .card-end { height: 12px; flex: none; }
 
+/* ---------- 任务 ---------- */
+.task-strip {
+  margin: 10px 10px 0;
+  padding: 8px 10px 9px;
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.task-strip .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.task-strip .money { font-size: 12px; color: var(--muted); flex: none; }
+.task-strip .eta { margin-top: 3px; font-size: 12px; color: var(--muted); }
+.task-strip.quick { display: flex; align-items: center; gap: 6px; }
+.task-name {
+  min-width: 0;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.task-name:hover { color: var(--accent); }
+.task-time { flex: none; font-size: 15px; font-weight: 600; }
+.task-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.wish.task { padding-left: 10px; }
+.wish.task .wish-name { margin-left: 0; }
+.task-clock { font-size: 22px; font-weight: 600; line-height: 1.3; }
+.warn-text { color: var(--warn); }
+.task-toggle { margin-top: 8px; align-items: flex-start; }
+.task-toggle input { margin-top: 2px; }
+.task-schedule { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+.task-schedule:empty { display: none; }
+.task-schedule label { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 12px; color: var(--muted); }
+.task-schedule input { width: 100%; font-size: 12px; padding: 3px 4px; color: var(--text); }
+.task-done { display: flex; align-items: center; gap: 6px; padding: 6px 2px; }
+.task-done-text { flex: 1; min-width: 0; }
+.task-done .wish-name { margin-left: 0; display: block; }
+.task-done .hint { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-done .icon-btn { width: 22px; height: 22px; }
+.task-done .icon-btn .icon { width: 14px; height: 14px; }
+.task-note { margin-top: 12px; }
+.task-list-box { margin-top: 18px; }
+.tabbar button { white-space: nowrap; }
+#tabs input.grow[type="text"] { display: block; }
+
 /* ---------- 迷你条 ---------- */
 .mini {
   display: flex;

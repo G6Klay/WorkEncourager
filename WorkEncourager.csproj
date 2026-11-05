@@ -13,7 +13,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>WorkEncourager</AssemblyName>
     <RootNamespace>WorkEncourager</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Product>上班鼓励器</Product>
     <AssemblyTitle>上班鼓励器</AssemblyTitle>
     <ApplicationIcon>assets\app.ico</ApplicationIcon>

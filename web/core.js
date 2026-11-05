@@ -12,6 +12,8 @@
   const EPS = 1e-6;
   const LEGAL_MONTH_DAYS = 21.75;
   const FORECAST_MAX_DAYS = 3660;
+  const TASK_ENDING_NOTICE = 5 * MINUTE;
+  const REMINDER_LATE_LIMIT = HOUR;
   const WEEK_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
   const MARK_NAMES = { holiday: '节假日', comp: '调休', personal: '事假', sick: '病假' };
   const HALF_NAMES = { am: '上午', pm: '下午' };
@@ -64,7 +66,8 @@
       wishes: [],
       wishSurplus: 0,
       wishShare: 100,
-      ui: { pinned: true, view: 'card', tab: 'schedule', hideMoney: false, sound: true, trayHintShown: false, reckon: false, yieldFullscreen: true },
+      tasks: [],
+      ui: { pinned: true, view: 'card', tab: 'schedule', hideMoney: false, sound: true, trayHintShown: false, reckon: false, yieldFullscreen: true, strip: 'wish' },
     };
   }
 
@@ -196,18 +199,65 @@
     s.wishSurplus = num(raw.wishSurplus, 0, 0);
     s.wishShare = num(raw.wishShare, 100, 0, 100);
 
+    if (Array.isArray(raw.tasks)) {
+      s.tasks = raw.tasks.map((t) => cleanTask(t, now)).filter(Boolean);
+      // 同一时间只能有一个任务在计时。
+      let running = false;
+      for (const t of s.tasks) {
+        if (t.status !== 'running') continue;
+        if (running) {
+          const seg = t.segments[t.segments.length - 1];
+          seg[1] = seg[0];
+          t.status = 'paused';
+        }
+        running = true;
+      }
+    }
+
     if (isObj(raw.ui)) {
       const u = raw.ui;
       s.ui.pinned = u.pinned !== false;
       s.ui.view = ['mini', 'card', 'panel'].includes(u.view) ? u.view : 'card';
-      s.ui.tab = ['schedule', 'wishes', 'records', 'settings'].includes(u.tab) ? u.tab : 'schedule';
+      s.ui.tab = ['schedule', 'wishes', 'tasks', 'records', 'settings'].includes(u.tab) ? u.tab : 'schedule';
       s.ui.hideMoney = u.hideMoney === true;
       s.ui.sound = u.sound !== false;
       s.ui.trayHintShown = u.trayHintShown === true;
       s.ui.reckon = u.reckon === true;
       s.ui.yieldFullscreen = u.yieldFullscreen !== false;
+      s.ui.strip = u.strip === 'task' ? 'task' : 'wish';
     }
     return s;
+  }
+
+  function cleanTask(t, now) {
+    if (!isObj(t) || typeof t.id !== 'string') return null;
+    const segs = Array.isArray(t.segments)
+      ? t.segments
+          .filter((p) => Array.isArray(p) && p.length === 2 && Number.isFinite(p[0]) && (p[1] === null || Number.isFinite(p[1])))
+          .map((p) => [p[0], p[1]])
+      : [];
+    let status = ['planned', 'running', 'paused', 'done'].includes(t.status) ? t.status : 'planned';
+    // 只有计时中的任务，最后一段才能没有结束时间。
+    segs.forEach((p, i) => {
+      if (p[1] === null && !(status === 'running' && i === segs.length - 1)) p[1] = p[0];
+    });
+    if (status === 'running' && (!segs.length || segs[segs.length - 1][1] !== null)) status = segs.length ? 'paused' : 'planned';
+    if ((status === 'paused' || status === 'done') && !segs.length) status = 'planned';
+    const n = isObj(t.notified) ? t.notified : {};
+    return {
+      id: t.id,
+      name: str(t.name, '任务', 40),
+      status,
+      createdAt: num(t.createdAt, now, 0),
+      scheduledStart: num(t.scheduledStart, null, 0),
+      scheduledEnd: num(t.scheduledEnd, null, 0),
+      segments: segs,
+      doneAt: status === 'done' ? num(t.doneAt, now, 0) : null,
+      seconds: num(t.seconds, 0, 0),
+      paidSeconds: num(t.paidSeconds, 0, 0),
+      earned: num(t.earned, 0, 0),
+      notified: { start: n.start === true, ending: n.ending === true, end: n.end === true },
+    };
   }
 
   /* 节假日只能标全天，调休和请假可以分上午、下午。 */
@@ -987,6 +1037,207 @@
     return n;
   }
 
+  /* ---------- 任务 ---------- */
+  /*
+   * 一段时间值多少工资：上班时段按时薪，下班之后到点下班之间按加班费，
+   * 午休、休息日、请假和已下班之后都不计。回报是工资的一部分，不会重复计入今日已赚。
+   */
+  function intervalPay(state, a, b) {
+    const result = { paidSeconds: 0, earned: 0 };
+    if (b <= a) return result;
+    const cache = new Map();
+    const overlap = (x, y) => Math.max(0, Math.min(b, y) - Math.max(a, x)) / SECOND;
+    for (let d = addDays(startOfDay(a), -1); d.getTime() <= b; d = addDays(d, 1)) {
+      const rec = state.records[dateKey(d)];
+      let segs;
+      let rate;
+      let otFrom;
+      let otTo;
+      if (rec) {
+        if (rec.voided || !rec.workSegs.length) continue;
+        rate = rec.paidSeconds > 0 ? rec.wage / rec.paidSeconds : 0;
+        segs = rec.workSegs.map(([x, y]) => [x, Math.min(y, rec.clockOut)]);
+        otFrom = rec.workSegs[rec.workSegs.length - 1][1];
+        otTo = rec.clockOut;
+      } else {
+        const inst = instanceFor(state, d);
+        if (!inst || inst.fullLeave) continue;
+        rate = inst.seconds > 0 ? dailyWage(state, d, { cache }) / inst.seconds : 0;
+        segs = inst.workSegs;
+        otFrom = inst.workEnd;
+        otTo = closeAt(state, inst);
+      }
+      for (const [x, y] of segs) {
+        const s = overlap(x, y);
+        result.paidSeconds += s;
+        result.earned += s * rate;
+      }
+      const otRate = overtimeRate(state.overtime, rate);
+      if (otRate > 0) {
+        const s = overlap(otFrom, otTo);
+        result.paidSeconds += s;
+        result.earned += s * otRate;
+      }
+    }
+    return result;
+  }
+
+  const findTask = (state, id) => state.tasks.find((t) => t.id === id) || null;
+  const runningTask = (state) => state.tasks.find((t) => t.status === 'running') || null;
+
+  /* 小窗优先显示计时中的任务，其次是最近暂停的。 */
+  function activeTask(state) {
+    const running = runningTask(state);
+    if (running) return running;
+    const paused = state.tasks.filter((t) => t.status === 'paused');
+    const lastEnd = (t) => t.segments[t.segments.length - 1][1];
+    return paused.sort((x, y) => lastEnd(y) - lastEnd(x))[0] || null;
+  }
+
+  function startedTasks(state) {
+    return state.tasks
+      .filter((t) => t.status === 'running' || t.status === 'paused')
+      .sort((x, y) => (x.status === 'running' ? -1 : y.status === 'running' ? 1 : y.createdAt - x.createdAt));
+  }
+
+  /* 还没开始的任务：有预约的按时间排在前面，其余按创建顺序。 */
+  function plannedTasks(state) {
+    const when = (t) => (t.scheduledStart === null ? Infinity : t.scheduledStart);
+    return state.tasks.filter((t) => t.status === 'planned').sort((x, y) => when(x) - when(y) || x.createdAt - y.createdAt);
+  }
+
+  function doneTasks(state, y, m) {
+    return state.tasks
+      .filter((t) => {
+        if (t.status !== 'done') return false;
+        const d = new Date(t.doneAt);
+        return d.getFullYear() === y && d.getMonth() === m;
+      })
+      .sort((x, z) => z.doneAt - x.doneAt);
+  }
+
+  function addTask(state, { name, scheduledStart, scheduledEnd }, now) {
+    const clean = typeof name === 'string' ? name.trim() : '';
+    const task = {
+      id: `t${now.toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
+      name: clean ? clean.slice(0, 40) : `任务 ${fmtDate(now).split(' ')[0]} ${fmtHM(now)}`,
+      status: 'planned',
+      createdAt: now,
+      scheduledStart: scheduledStart === undefined ? null : scheduledStart,
+      scheduledEnd: scheduledEnd === undefined ? null : scheduledEnd,
+      segments: [],
+      doneAt: null,
+      seconds: 0,
+      paidSeconds: 0,
+      earned: 0,
+      notified: { start: false, ending: false, end: false },
+    };
+    state.tasks.push(task);
+    return task;
+  }
+
+  function pauseTask(state, id, now) {
+    const t = findTask(state, id);
+    if (!t || t.status !== 'running') return;
+    t.segments[t.segments.length - 1][1] = Math.max(now, t.segments[t.segments.length - 1][0]);
+    t.status = 'paused';
+  }
+
+  /* 下班时暂停正在计时的任务，返回被暂停的任务。 */
+  function pauseRunningTask(state, now) {
+    const t = runningTask(state);
+    if (t) pauseTask(state, t.id, now);
+    return t;
+  }
+
+  /* 开始或继续。一次只计一个任务，别的任务在计时就先暂停。 */
+  function startTask(state, id, now) {
+    const t = findTask(state, id);
+    if (!t || t.status === 'running' || t.status === 'done') return;
+    pauseRunningTask(state, now);
+    t.segments.push([now, null]);
+    t.status = 'running';
+  }
+
+  function taskStats(state, task, now) {
+    if (task.status === 'done') return { seconds: task.seconds, paidSeconds: task.paidSeconds, earned: task.earned };
+    const stats = { seconds: 0, paidSeconds: 0, earned: 0 };
+    for (const [a, b] of task.segments) {
+      const end = b === null ? now : b;
+      stats.seconds += Math.max(0, end - a) / SECOND;
+      const pay = intervalPay(state, a, end);
+      stats.paidSeconds += pay.paidSeconds;
+      stats.earned += pay.earned;
+    }
+    return stats;
+  }
+
+  /* 结算：把耗时和回报固定下来，之后改工资或排班都不影响这条记录。 */
+  function finishTask(state, id, now) {
+    const t = findTask(state, id);
+    if (!t || (t.status !== 'running' && t.status !== 'paused')) return null;
+    pauseTask(state, id, now);
+    const stats = taskStats(state, t, now);
+    Object.assign(t, stats, { status: 'done', doneAt: now });
+    return t;
+  }
+
+  /* 撤销结算，回到暂停状态。 */
+  function reopenTask(state, id) {
+    const t = findTask(state, id);
+    if (!t || t.status !== 'done') return;
+    Object.assign(t, { status: 'paused', doneAt: null, seconds: 0, paidSeconds: 0, earned: 0 });
+  }
+
+  function updateTask(state, id, patch) {
+    const t = findTask(state, id);
+    if (!t) return;
+    if (patch.name !== undefined) t.name = str(patch.name.trim(), t.name, 40) || t.name;
+    if (patch.scheduledStart !== undefined && patch.scheduledStart !== t.scheduledStart) {
+      t.scheduledStart = patch.scheduledStart;
+      t.notified.start = false;
+    }
+    if (patch.scheduledEnd !== undefined && patch.scheduledEnd !== t.scheduledEnd) {
+      t.scheduledEnd = patch.scheduledEnd;
+      t.notified.ending = false;
+      t.notified.end = false;
+    }
+  }
+
+  function removeTask(state, id) {
+    state.tasks = state.tasks.filter((t) => t.id !== id);
+  }
+
+  /*
+   * 到点的预约提醒，每种只提醒一次。程序没开时错过太久的就不补了，只在任务页标出来。
+   * “快结束”和“结束”只提醒已经开始的任务，没开始的任务提醒结束没有意义。
+   */
+  function dueTaskReminders(state, now) {
+    const reminders = [];
+    let changed = false;
+    for (const t of state.tasks) {
+      if (t.status === 'done') continue;
+      const n = t.notified;
+      if (t.scheduledStart !== null && !n.start && now >= t.scheduledStart) {
+        n.start = true;
+        changed = true;
+        if (t.status === 'planned' && now - t.scheduledStart < REMINDER_LATE_LIMIT) reminders.push({ kind: 'start', task: t });
+      }
+      if (t.scheduledEnd === null || t.status === 'planned') continue;
+      if (!n.end && now >= t.scheduledEnd) {
+        n.end = true;
+        n.ending = true;
+        changed = true;
+        if (now - t.scheduledEnd < REMINDER_LATE_LIMIT) reminders.push({ kind: 'end', task: t });
+      } else if (!n.ending && now >= t.scheduledEnd - TASK_ENDING_NOTICE) {
+        n.ending = true;
+        changed = true;
+        reminders.push({ kind: 'ending', task: t });
+      }
+    }
+    return { reminders, changed };
+  }
+
   /* ---------- 排班编辑 ---------- */
   /*
    * 在日历上点一下。brush: { kind: 'shift', id } | { kind: 'off' } | { kind: 'mark', type, half }。
@@ -1212,6 +1463,23 @@
     voidRecord,
     unreviewedRecords,
     markReviewed,
+    intervalPay,
+    findTask,
+    runningTask,
+    activeTask,
+    startedTasks,
+    plannedTasks,
+    doneTasks,
+    addTask,
+    startTask,
+    pauseTask,
+    pauseRunningTask,
+    finishTask,
+    reopenTask,
+    updateTask,
+    removeTask,
+    taskStats,
+    dueTaskReminders,
     monthStats,
     monthReckon,
     monthLeaveDays,

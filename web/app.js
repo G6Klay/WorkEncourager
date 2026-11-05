@@ -23,6 +23,7 @@
   const TABS = [
     ['schedule', '排班'],
     ['wishes', '心愿'],
+    ['tasks', '任务'],
     ['records', '记录'],
     ['settings', '参数设置'],
   ];
@@ -78,6 +79,9 @@
     cardKey: null,
     calendar: { y: initial.getFullYear(), m: initial.getMonth() },
     records: { y: initial.getFullYear(), m: initial.getMonth() },
+    taskMonth: { y: initial.getFullYear(), m: initial.getMonth() },
+    taskRefs: new Map(),
+    refreshTaskList: null,
     brush: `shift:${state.schedule.shifts[0].id}`,
     lastShift: state.schedule.shifts[0].id,
     half: null,
@@ -270,8 +274,11 @@
 
   function cardKeyFor(st, now) {
     const head = C.activeWishes(state)[0];
+    const task = C.activeTask(state) || C.plannedTasks(state)[0];
     return [
       state.ui.view,
+      state.ui.strip,
+      task ? `${task.id}:${task.status}:${task.name}` : '',
       st.kind,
       st.inst ? st.inst.key : '',
       C.markText(st.mark),
@@ -345,6 +352,75 @@
       c.wishEta);
   }
 
+  /* 小窗的任务进度：有进行中的任务就显示它，否则显示下一项，都没有就可以直接新建。 */
+  function renderTaskStrip(c) {
+    const active = C.activeTask(state);
+    if (active) {
+      c.taskActive = active;
+      c.taskTime = h('span', { class: 'task-time' });
+      c.taskDetail = h('div', { class: 'eta' });
+      return h('div', { class: 'task-strip' },
+        h('div', { class: 'row' },
+          h('button', { class: 'task-name', title: `查看任务：${active.name}`, onclick: () => openTab('tasks') }, active.name),
+          c.taskTime),
+        c.taskDetail,
+        h('div', { class: 'task-actions' },
+          active.status === 'running'
+            ? h('button', { class: 'btn small', onclick: () => taskAction(() => C.pauseTask(state, active.id, Date.now())) }, '暂停')
+            : h('button', { class: 'btn small', onclick: () => taskAction(() => C.startTask(state, active.id, Date.now())) }, '继续'),
+          h('button', { class: 'btn small primary', onclick: () => settleTask(active.id) }, '结算')));
+    }
+    const next = C.plannedTasks(state)[0];
+    if (next) {
+      c.taskNext = next;
+      c.taskNextWhen = h('span', { class: 'money' });
+      return h('div', { class: 'task-strip' },
+        h('div', { class: 'row' },
+          h('button', { class: 'task-name', title: `查看任务：${next.name}`, onclick: () => openTab('tasks') }, next.name),
+          c.taskNextWhen),
+        h('div', { class: 'task-actions' },
+          h('button', { class: 'btn small primary', onclick: () => taskAction(() => C.startTask(state, next.id, Date.now())) }, '开始计时')));
+    }
+    const input = h('input', { type: 'text', class: 'grow', placeholder: '新任务名称（可不填）', maxLength: 40, 'aria-label': '任务名称' });
+    const start = () => {
+      const task = C.addTask(state, { name: input.value }, Date.now());
+      taskAction(() => C.startTask(state, task.id, Date.now()));
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') start();
+    });
+    return h('div', { class: 'task-strip quick' }, input, h('button', { class: 'btn small primary', onclick: start }, '开始'));
+  }
+
+  function taskScheduleText(task, now) {
+    if (task.scheduledStart === null) return task.scheduledEnd === null ? '' : `${C.fmtDate(task.scheduledEnd)} ${C.fmtHM(task.scheduledEnd)} 结束`;
+    const sameDay = C.dateKey(new Date(task.scheduledStart)) === C.dateKey(new Date(now));
+    const start = `${sameDay ? '今天' : C.fmtDate(task.scheduledStart)} ${C.fmtHM(task.scheduledStart)}`;
+    return task.scheduledEnd === null ? start : `${start}–${C.fmtHM(task.scheduledEnd)}`;
+  }
+
+  function taskEndText(task, now) {
+    if (task.scheduledEnd === null) return '';
+    return now >= task.scheduledEnd ? '已到结束时间' : `距结束 ${C.fmtCountdown(task.scheduledEnd - now)}`;
+  }
+
+  function updateTaskStrip(c, now) {
+    if (c.taskActive) {
+      const stats = C.taskStats(state, c.taskActive, now);
+      setText(c.taskTime, C.fmtDuration(stats.seconds));
+      const parts = [];
+      if (c.taskActive.status === 'paused') parts.push('已暂停');
+      parts.push(state.ui.hideMoney ? '回报 ¥ ••••' : `回报 ¥${C.fmtMoney(stats.earned)}`);
+      const end = taskEndText(c.taskActive, now);
+      parts.push(end || `计薪 ${C.fmtDuration(stats.paidSeconds)}`);
+      setText(c.taskDetail, parts.join(' · '));
+    } else if (c.taskNext) {
+      const t = c.taskNext;
+      if (t.scheduledStart !== null && now >= t.scheduledStart) setText(c.taskNextWhen, '已到预约时间');
+      else setText(c.taskNextWhen, taskScheduleText(t, now) || '未预约');
+    }
+  }
+
   function renderCard(st, now) {
     const top = $('#top');
     const view = state.ui.view;
@@ -399,7 +475,7 @@
     } else if (st.kind === 'working' || st.kind === 'lunch') {
       top.append(h('div', { class: 'card-actions right' }, h('button', { class: 'link quiet', onclick: settleNow }, '提前下班')));
     }
-    if (view === 'card') top.append(renderWishStrip(c));
+    if (view === 'card') top.append(state.ui.strip === 'task' ? renderTaskStrip(c) : renderWishStrip(c));
     top.append(h('div', { class: 'card-end' }));
   }
 
@@ -474,6 +550,7 @@
       setText(c.heroSub, st.next ? nextText(st.next) : '后面还没有排班');
     }
 
+    updateTaskStrip(c, now);
     if (c.wishEta && fc.items.length) {
       const item = fc.items[0];
       const pct = item.wish.budget > 0 ? (item.saved / item.wish.budget) * 100 : 0;
@@ -516,6 +593,7 @@
     const tabs = $('#tabs');
     tabs.replaceChildren();
     ui.tabLive = null;
+    ui.refreshTaskList = null;
     if (state.ui.view !== 'panel') return;
     const body = h('div', { class: 'tab-body' });
     tabs.append(
@@ -536,7 +614,7 @@
     ui.wishRefs = new Map();
     ui.surplusRef = null;
     ui.autostartEl = null;
-    ({ schedule: renderScheduleTab, wishes: renderWishesTab, records: renderRecordsTab, settings: renderSettingsTab })[state.ui.tab](body);
+    ({ schedule: renderScheduleTab, wishes: renderWishesTab, tasks: renderTasksTab, records: renderRecordsTab, settings: renderSettingsTab })[state.ui.tab](body);
   }
 
   /* ----- 排班 ----- */
@@ -1014,6 +1092,276 @@
     if (ui.surplusRef) setText(ui.surplusRef, fc.surplus > 0.005 ? `还有 ¥${C.fmtMoney(fc.surplus)} 没地方存，添加新心愿时会自动转入。` : '');
   }
 
+  /* ----- 任务 ----- */
+  function afterTaskChange() {
+    save();
+    if (ui.refreshTaskList) ui.refreshTaskList();
+    ui.cardKey = null;
+    frame();
+  }
+
+  function taskAction(fn) {
+    fn();
+    afterTaskChange();
+  }
+
+  function settleTask(id) {
+    const task = C.finishTask(state, id, Date.now());
+    if (!task) return;
+    afterTaskChange();
+    openDialog({
+      title: '任务结算',
+      body: [
+        h('div', { class: 'dialog-total' }, `¥${C.fmtMoney(task.earned)}`),
+        h('div', { class: 'rows' },
+          h('div', null, h('span', null, '任务'), h('span', null, task.name)),
+          h('div', null, h('span', null, '总耗时'), h('span', null, C.fmtDuration(task.seconds))),
+          h('div', null, h('span', null, '计薪工时'), h('span', null, C.fmtDuration(task.paidSeconds)))),
+        h('p', { class: 'hint' }, '这是这段时间对应的工资，已经包含在今日已赚里。'),
+      ],
+      actions: [
+        { label: '完成', kind: 'primary' },
+        {
+          label: '点错了，继续计时',
+          kind: 'ghost',
+          onClick: () => {
+            C.reopenTask(state, id);
+            C.startTask(state, id, Date.now());
+            afterTaskChange();
+          },
+        },
+      ],
+    });
+  }
+
+  const inputTime = (input) => (input.value ? new Date(input.value).getTime() : null);
+
+  /* 校验预约时间，返回错误文字；没问题时返回空字符串。 */
+  function scheduleError(start, end) {
+    if (start !== null && !Number.isFinite(start)) return '开始时间无效';
+    if (end !== null && !Number.isFinite(end)) return '结束时间无效';
+    if (start !== null && end !== null && end <= start) return '结束时间要晚于开始时间';
+    return '';
+  }
+
+  function taskDialog(task) {
+    const name = h('input', { type: 'text', value: task.name, maxLength: 40 });
+    const editable = task.status !== 'done';
+    const startInput = h('input', { type: 'datetime-local', value: task.scheduledStart === null ? '' : toLocalInput(task.scheduledStart) });
+    const endInput = h('input', { type: 'datetime-local', value: task.scheduledEnd === null ? '' : toLocalInput(task.scheduledEnd) });
+    const error = h('p', { class: 'error-text' });
+    openDialog({
+      title: '编辑任务',
+      body: [
+        h('label', null, '名称', name),
+        editable && h('label', null, '预约开始（可不填）', startInput),
+        editable && h('label', null, '预约结束（可不填）', endInput),
+        error,
+      ],
+      actions: [
+        {
+          label: '保存',
+          kind: 'primary',
+          onClick: () => {
+            if (!name.value.trim()) {
+              error.textContent = '请填写任务名称';
+              return false;
+            }
+            const patch = { name: name.value };
+            if (editable) {
+              const start = inputTime(startInput);
+              const end = inputTime(endInput);
+              const message = scheduleError(start, end);
+              if (message) {
+                error.textContent = message;
+                return false;
+              }
+              patch.scheduledStart = start;
+              patch.scheduledEnd = end;
+            }
+            C.updateTask(state, task.id, patch);
+            afterTaskChange();
+            return true;
+          },
+        },
+        { label: '取消', kind: 'ghost' },
+      ],
+    });
+  }
+
+  function deleteTaskDialog(task) {
+    openDialog({
+      title: `删除「${task.name}」？`,
+      body: task.segments.length ? [h('p', null, '它的计时记录也会一起删除。')] : [],
+      actions: [
+        {
+          label: '删除',
+          kind: 'danger',
+          onClick: () => {
+            C.removeTask(state, task.id);
+            afterTaskChange();
+          },
+        },
+        { label: '取消', kind: 'ghost' },
+      ],
+    });
+  }
+
+  function taskIcons(task) {
+    return h('span', { class: 'wish-actions' },
+      iconButton('edit', '编辑', () => taskDialog(task)),
+      iconButton('trash', '删除', () => deleteTaskDialog(task)));
+  }
+
+  function renderStartedTask(task) {
+    const running = task.status === 'running';
+    const time = h('div', { class: 'task-clock' });
+    const detail = h('div', { class: 'wish-eta' });
+    ui.taskRefs.set(task.id, { task, time, detail });
+    return h('div', { class: `wish task${running ? ' head' : ''}` },
+      h('div', { class: 'wish-top' },
+        h('span', { class: 'wish-name', title: task.name }, task.name),
+        h('span', { class: running ? 'tag' : 'tag muted' }, running ? '计时中' : '已暂停'),
+        taskIcons(task)),
+      time,
+      detail,
+      h('div', { class: 'cal-tools' },
+        running
+          ? h('button', { class: 'btn small', onclick: () => taskAction(() => C.pauseTask(state, task.id, Date.now())) }, '暂停')
+          : h('button', { class: 'btn small', onclick: () => taskAction(() => C.startTask(state, task.id, Date.now())) }, '继续'),
+        h('button', { class: 'btn small primary', onclick: () => settleTask(task.id) }, '结算')));
+  }
+
+  function renderPlannedTask(task, now) {
+    const missed = task.scheduledStart !== null && now >= task.scheduledStart;
+    return h('div', { class: 'wish task' },
+      h('div', { class: 'wish-top' },
+        h('span', { class: 'wish-name', title: task.name }, task.name),
+        taskIcons(task)),
+      h('div', { class: `wish-eta${missed ? ' warn-text' : ''}` }, missed ? `已到预约时间（${taskScheduleText(task, now)}）` : taskScheduleText(task, now) || '未预约'),
+      h('div', { class: 'cal-tools' },
+        h('button', { class: 'btn small primary', onclick: () => taskAction(() => C.startTask(state, task.id, Date.now())) }, '开始计时')));
+  }
+
+  function renderTaskList(box) {
+    const now = Date.now();
+    ui.taskRefs = new Map();
+    const started = C.startedTasks(state);
+    const planned = C.plannedTasks(state);
+    const { y, m } = ui.taskMonth;
+    const done = C.doneTasks(state, y, m);
+    const totals = done.reduce((sum, t) => ({ seconds: sum.seconds + t.seconds, earned: sum.earned + t.earned }), { seconds: 0, earned: 0 });
+    const go = (delta) => {
+      const d = new Date(y, m + delta, 1);
+      ui.taskMonth = { y: d.getFullYear(), m: d.getMonth() };
+      renderTaskList(box);
+    };
+
+    const nodes = [];
+    if (started.length) nodes.push(h('section', null, h('h3', null, '进行中'), h('div', { class: 'wish-list' }, started.map(renderStartedTask))));
+    if (planned.length) nodes.push(h('section', null, h('h3', null, '待开始'), h('div', { class: 'wish-list' }, planned.map((t) => renderPlannedTask(t, now)))));
+    nodes.push(h('section', null,
+      h('h3', null, '已完成'),
+      h('div', { class: 'cal-head' },
+        iconButton('left', '上个月', () => go(-1)),
+        h('div', { class: 'cal-title' }, `${y} 年 ${m + 1} 月`),
+        iconButton('right', '下个月', () => go(1))),
+      done.length
+        ? [
+          h('div', { class: 'summary' }, `完成 ${done.length} 个 · 耗时 ${C.fmtDuration(totals.seconds)} · 回报 `, h('b', null, `¥${C.fmtMoney(totals.earned)}`)),
+          h('div', { class: 'rec-list' }, done.map((t) => h('div', { class: 'rec' },
+            h('div', { class: 'task-done' },
+              h('div', { class: 'task-done-text' },
+                h('div', { class: 'wish-name', title: t.name }, t.name),
+                h('div', { class: 'hint' }, `${C.fmtDate(t.doneAt)} · 耗时 ${C.fmtDuration(t.seconds)} · 计薪 ${C.fmtDuration(t.paidSeconds)}`)),
+              h('span', { class: 'rec-total' }, `¥${C.fmtMoney(t.earned)}`),
+              taskIcons(t))))),
+        ]
+        : h('p', { class: 'empty-note' }, '这个月还没有完成的任务')));
+    nodes.push(h('p', { class: 'hint task-note' }, '回报是这段时间对应的工资：上班时段按时薪，下班后按加班费，午休、休息日和点了下班之后不计。它已经包含在今日已赚里，不会重复计算，也不会另外存入心愿。'));
+    box.replaceChildren(...nodes);
+    updateTaskRefs(now);
+  }
+
+  function updateTaskRefs(now) {
+    for (const { task, time, detail } of ui.taskRefs.values()) {
+      const stats = C.taskStats(state, task, now);
+      setText(time, C.fmtDuration(stats.seconds));
+      const parts = [`计薪 ${C.fmtDuration(stats.paidSeconds)}`, `回报 ¥${C.fmtMoney(stats.earned)}`];
+      const end = taskEndText(task, now);
+      if (end) parts.push(end);
+      setText(detail, parts.join(' · '));
+    }
+  }
+
+  function renderTasksTab(body) {
+    const name = h('input', { class: 'grow', type: 'text', placeholder: '任务名称（可不填）', maxLength: 40, 'aria-label': '任务名称' });
+    const defaultStart = new Date(Date.now() + 30 * C.MINUTE);
+    const startInput = h('input', { type: 'datetime-local', value: toLocalInput(defaultStart.getTime()) });
+    const endInput = h('input', { type: 'datetime-local' });
+    const scheduleBox = h('div', { class: 'task-schedule' });
+    const buttons = h('div', { class: 'cal-tools' });
+    const error = h('p', { class: 'error-text' });
+
+    const add = (scheduled) => {
+      error.textContent = '';
+      const now = Date.now();
+      let start;
+      let end;
+      if (scheduled) {
+        start = inputTime(startInput);
+        end = inputTime(endInput);
+        if (start === null) {
+          error.textContent = '请选择预约开始时间';
+          return null;
+        }
+        const message = scheduleError(start, end) || (start <= now ? '预约时间要晚于现在' : '');
+        if (message) {
+          error.textContent = message;
+          return null;
+        }
+      }
+      const task = C.addTask(state, { name: name.value, scheduledStart: start, scheduledEnd: end }, now);
+      name.value = '';
+      return task;
+    };
+
+    const toggle = h('input', { type: 'checkbox' });
+    const paint = () => {
+      const scheduled = toggle.checked;
+      scheduleBox.replaceChildren(...(scheduled ? [h('label', null, '开始', startInput), h('label', null, '结束（可不填）', endInput)] : []));
+      buttons.replaceChildren(...(scheduled
+        ? [h('button', { class: 'btn small primary', onclick: () => { if (add(true)) afterTaskChange(); } }, '预约')]
+        : [
+          h('button', {
+            class: 'btn small primary',
+            onclick: () => {
+              const task = add(false);
+              if (task) taskAction(() => C.startTask(state, task.id, Date.now()));
+            },
+          }, '开始计时'),
+          h('button', { class: 'btn small', onclick: () => { if (add(false)) afterTaskChange(); } }, '加入清单'),
+        ]));
+    };
+    toggle.addEventListener('change', paint);
+    paint();
+
+    const listBox = h('div', { class: 'task-list-box' });
+    ui.refreshTaskList = () => renderTaskList(listBox);
+    ui.tabLive = (st, now) => updateTaskRefs(now);
+
+    body.append(
+      h('section', null,
+        h('h3', null, '新建任务'),
+        name,
+        h('label', { class: 'check task-toggle' }, toggle, '预约时间（到点提醒开始；填了结束时间，还会在结束前 5 分钟和结束时提醒）'),
+        scheduleBox,
+        error,
+        buttons),
+      listBox);
+    renderTaskList(listBox);
+  }
+
   /* ----- 记录 ----- */
   function toLocalInput(ms) {
     const d = new Date(ms);
@@ -1390,6 +1738,13 @@
         percentField('收入的多少存入心愿', () => state.wishShare, (v) => { state.wishShare = Math.min(100, v); })),
       h('section', null,
         h('h3', null, '小窗'),
+        h('div', { class: 'field' }, h('span', { class: 'label' }, '卡片下方显示')),
+        segmented([['wish', '心愿进度'], ['task', '任务进度']], state.ui.strip, (v) => {
+          state.ui.strip = v;
+          save();
+          ui.cardKey = null;
+          frame();
+        }),
         toggleRow('全屏时自动让位（放 PPT、看视频时隐藏）', state.ui.yieldFullscreen, (on) => {
           state.ui.yieldFullscreen = on;
           save();
@@ -1474,16 +1829,19 @@
   }
 
   function doClockOut() {
-    const res = C.clockOut(state, Date.now());
+    const now = Date.now();
+    const res = C.clockOut(state, now);
     if (!res) return;
+    // 下班后时间不再计薪，正在计时的任务也暂停，否则忘了停，耗时就不准了。
+    const pausedTask = C.pauseRunningTask(state, now);
     save();
     ui.cardKey = null;
     renderTabs();
     frame();
-    showSettlement(res);
+    showSettlement(res, pausedTask);
   }
 
-  function showSettlement({ record, filled }) {
+  function showSettlement({ record, filled }, pausedTask) {
     const d = new Date(record.start);
     const month = C.monthStats(state, d.getFullYear(), d.getMonth());
     const allocRows = record.alloc.map((p) => {
@@ -1504,6 +1862,7 @@
           allocRows,
           h('div', null, h('span', null, '本月累计'), h('span', null, `¥${C.fmtMoney(month.earned)}`))),
         filled.length ? h('p', { class: 'celebrate' }, `${filled.map((w) => `「${w.name}」`).join('、')}蓄满了，可以去实现它了。`) : null,
+        pausedTask ? h('p', { class: 'hint' }, `任务「${pausedTask.name}」已暂停，明天可以继续。`) : null,
       ],
       actions: [
         { label: '辛苦了，收工', kind: 'primary' },
@@ -1513,6 +1872,7 @@
           onClick: () => {
             C.reopenRecord(state, record.key);
             state.remindedKey = record.key;
+            if (pausedTask) C.startTask(state, pausedTask.id, Date.now());
             save();
             ui.cardKey = null;
             renderTabs();
@@ -1547,6 +1907,20 @@
     post({ type: 'notify', title: '到下班时间了', body: `${money}点「下班结算」收工。`, popup: true });
   }
 
+  function announceTaskReminders(reminders, now) {
+    for (const { kind, task } of reminders) {
+      if (kind === 'start') {
+        post({ type: 'notify', title: '该开始任务了', body: `「${task.name}」预约在 ${C.fmtHM(task.scheduledStart)} 开始。`, popup: true });
+      } else if (kind === 'ending') {
+        const minutes = Math.max(1, Math.ceil((task.scheduledEnd - now) / C.MINUTE));
+        post({ type: 'notify', title: '任务快结束了', body: `「${task.name}」还有 ${minutes} 分钟到预约的结束时间。`, popup: false });
+      } else {
+        post({ type: 'notify', title: '任务到结束时间了', body: `「${task.name}」已到预约的结束时间，记得结算。`, popup: true });
+      }
+    }
+    chime();
+  }
+
   function updateTooltip(st, now) {
     if (now - ui.tooltipAt < 5000) return;
     ui.tooltipAt = now;
@@ -1566,6 +1940,14 @@
       ui.cardKey = null;
       announceAutoSettled(auto);
     }
+
+    const due = C.dueTaskReminders(state, now);
+    if (due.changed) {
+      save();
+      ui.cardKey = null;
+      if (ui.refreshTaskList) ui.refreshTaskList();
+    }
+    if (due.reminders.length) announceTaskReminders(due.reminders, now);
 
     const dayKey = C.dateKey(new Date(now));
     if (dayKey !== ui.day) {
