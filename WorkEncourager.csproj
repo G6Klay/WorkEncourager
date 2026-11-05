@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <!-- .NET 9 不在了也能继续用：自动使用机器上更新的大版本运行时 -->
+    <RollForward>Major</RollForward>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>WorkEncourager</AssemblyName>
+    <RootNamespace>WorkEncourager</RootNamespace>
+    <Version>0.1.0</Version>
+    <Product>上班鼓励器</Product>
+    <AssemblyTitle>上班鼓励器</AssemblyTitle>
+    <ApplicationIcon>assets\app.ico</ApplicationIcon>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <PublishDir>dist\</PublishDir>
+    <PublishReferencesDocumentationFiles>false</PublishReferencesDocumentationFiles>
+    <!-- LibraryImport 的源生成器需要 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- WebView2 包同时带了 WPF 程序集，这个程序只用 WinForms，版本冲突警告与运行无关 -->
+    <MSBuildWarningsAsMessages>$(MSBuildWarningsAsMessages);MSB3277</MSBuildWarningsAsMessages>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DefaultItemExcludes>$(DefaultItemExcludes);dist\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src\**\*.cs" />
+    <EmbeddedResource Include="web\**\*" LogicalName="web/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="assets\app.ico" LogicalName="app.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+  </ItemGroup>
+
+</Project>

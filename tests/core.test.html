@@ -1,0 +1,1068 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>core tests</title>
+<script src="../web/core.js"></script>
+</head>
+<body>
+<pre id="result">running</pre>
+<script>
+const C = window.Core;
+const results = [];
+
+function test(name, fn) {
+  try { fn(); results.push(`PASS ${name}`); }
+  catch (e) { results.push(`FAIL ${name}: ${e.message}`); }
+}
+function eq(actual, expected, label) {
+  const a = JSON.stringify(actual), b = JSON.stringify(expected);
+  if (a !== b) throw new Error(`${label || ''} expected ${b}, got ${a}`);
+}
+function near(actual, expected, label, tol = 0.001) {
+  if (Math.abs(actual - expected) > tol) throw new Error(`${label || ''} expected ${expected}, got ${actual}`);
+}
+const at = (y, mo, d, h = 0, mi = 0, s = 0) => new Date(y, mo - 1, d, h, mi, s).getTime();
+
+/* 2026 年 11 月：1 日是周日，共 21 个工作日。11 月 5 日是周四。 */
+const BASE = at(2026, 11, 1);
+function make(patch) {
+  const s = C.defaultState(BASE);
+  s.salary.monthly = 8000;
+  // 下面大部分用例验证的是没有午休时的基础算法，午休有单独的用例。
+  s.schedule.shifts[0].breakStart = null;
+  s.schedule.shifts[0].breakEnd = null;
+  return Object.assign(s, patch || {});
+}
+/* 09:00–18:00，午休 12:00–13:00，计薪工时 8 小时。 */
+function makeLunch(patch) {
+  const s = make(patch);
+  s.schedule.shifts[0].breakStart = '12:00';
+  s.schedule.shifts[0].breakEnd = '13:00';
+  return s;
+}
+const wage = 8000 / 21;
+const hourly8 = wage / 8;
+
+test('按周：月薪按当月排班天数折算日薪', () => {
+  const s = make();
+  eq(C.workDayCount(s.schedule, 2026, 10), 21);
+  near(C.dailyWage(s, new Date(2026, 10, 5)), wage);
+});
+
+test('按周：不同月份天数不同，日薪随之变化', () => {
+  const s = make();
+  // 2026 年 12 月有 23 个工作日
+  eq(C.workDayCount(s.schedule, 2026, 11), 23);
+  near(C.dailyWage(s, new Date(2026, 11, 1)), 8000 / 23);
+});
+
+test('按周：只上周二和周六也能算', () => {
+  const s = make();
+  s.schedule.weekly = { 2: 'day', 6: 'day' };
+  eq(C.workDayCount(s.schedule, 2026, 10), 8);
+  near(C.dailyWage(s, new Date(2026, 10, 3)), 1000);
+  eq(C.getStatus(s, at(2026, 11, 5, 10)).kind, 'rest');
+  eq(C.getStatus(s, at(2026, 11, 3, 10)).kind, 'working');
+});
+
+test('按月：只有手选的日期算上班，并按手选天数折算', () => {
+  const s = make();
+  s.schedule.mode = 'monthly';
+  [3, 7, 12, 20].forEach((d) => C.toggleDay(s, new Date(2026, 10, d), 'day'));
+  eq(C.workDayCount(s.schedule, 2026, 10), 4);
+  near(C.dailyWage(s, new Date(2026, 10, 3)), 2000);
+  eq(C.getStatus(s, at(2026, 11, 7, 10)).kind, 'working');
+  eq(C.getStatus(s, at(2026, 11, 8, 10)).kind, 'rest');
+  C.toggleDay(s, new Date(2026, 10, 7), 'day');
+  eq(C.workDayCount(s.schedule, 2026, 10), 3);
+});
+
+test('按月：下个月没排班时不算上班', () => {
+  const s = make();
+  s.schedule.mode = 'monthly';
+  C.toggleDay(s, new Date(2026, 10, 3), 'day');
+  eq(C.workDayCount(s.schedule, 2026, 11), 0);
+  eq(C.dailyWage(s, new Date(2026, 11, 3)), 0);
+});
+
+test('固定 21.75 天算法', () => {
+  const s = make();
+  s.salary.divisor = 'legal';
+  near(C.dailyWage(s, new Date(2026, 10, 5)), 8000 / 21.75);
+});
+
+test('周模式的单日例外：请假和加班日都计入当月天数', () => {
+  const s = make();
+  C.toggleDay(s, new Date(2026, 10, 5), 'day');
+  eq(s.schedule.exceptions['2026-11-05'], 'off');
+  eq(C.workDayCount(s.schedule, 2026, 10), 20);
+  eq(C.getStatus(s, at(2026, 11, 5, 10)).kind, 'rest');
+  C.toggleDay(s, new Date(2026, 10, 5), 'day');
+  eq(s.schedule.exceptions['2026-11-05'], undefined);
+  C.toggleDay(s, new Date(2026, 10, 7), 'day');
+  eq(C.workDayCount(s.schedule, 2026, 10), 22);
+  eq(C.getStatus(s, at(2026, 11, 7, 10)).kind, 'working');
+});
+
+test('状态随时间自动切换：上班前、工作中、到点待结算', () => {
+  const s = make();
+  const before = C.getStatus(s, at(2026, 11, 5, 8, 30));
+  eq(before.kind, 'before');
+  eq(before.target, at(2026, 11, 5, 9));
+  const mid = C.getStatus(s, at(2026, 11, 5, 13, 30));
+  eq(mid.kind, 'working');
+  near(mid.earn.total, wage / 2);
+  near(mid.progress, 0.5);
+  eq(mid.target, at(2026, 11, 5, 18));
+  eq(C.getStatus(s, at(2026, 11, 5, 17, 59, 59)).kind, 'working');
+  eq(C.getStatus(s, at(2026, 11, 5, 18)).kind, 'overtime');
+});
+
+test('到下班时间不会自动结算，要等手动点', () => {
+  const s = make();
+  s.processedFrom = '2026-11-05';
+  const later = at(2026, 11, 5, 20);
+  eq(C.autoSettle(s, later).length, 0);
+  eq(C.getStatus(s, later).kind, 'overtime');
+  eq(s.records['2026-11-05'], undefined);
+});
+
+test('每秒都在涨：相邻两秒的差等于每秒费率', () => {
+  const s = make();
+  const a = C.getStatus(s, at(2026, 11, 5, 10, 0, 0));
+  const b = C.getStatus(s, at(2026, 11, 5, 10, 0, 1));
+  near(b.earn.total - a.earn.total, wage / (9 * 3600), 'per second', 1e-9);
+});
+
+test('加班费三种模式', () => {
+  const t = at(2026, 11, 5, 19);
+  const s = make();
+  near(C.getStatus(s, t).earn.overtime, (wage / 9) * 1.5, 'multiplier');
+  s.overtime.mode = 'fixed';
+  s.overtime.hourly = 50;
+  near(C.getStatus(s, t).earn.overtime, 50, 'fixed');
+  s.overtime.mode = 'none';
+  near(C.getStatus(s, t).earn.overtime, 0, 'none');
+  near(C.getStatus(s, t).earn.total, wage, 'none total');
+});
+
+test('手动下班：写入记录、变成已结算、不能重复结算', () => {
+  const s = make();
+  s.overtime.mode = 'none';
+  const t = at(2026, 11, 5, 18, 30);
+  const res = C.clockOut(s, t);
+  near(res.record.total, wage);
+  eq(res.record.auto, false);
+  const st = C.getStatus(s, t + 1000);
+  eq(st.kind, 'settled');
+  eq(C.todayEarned(st), res.record.total);
+  eq(st.target, at(2026, 11, 6, 9));
+  eq(C.clockOut(s, t + 2000), null);
+});
+
+test('撤销结算：回到待结算状态，心愿进度退回', () => {
+  const s = make();
+  s.overtime.mode = 'none';
+  C.addWish(s, { name: 'A', budget: 10000 }, BASE);
+  const t = at(2026, 11, 5, 18, 30);
+  C.clockOut(s, t);
+  near(s.wishes[0].saved, wage);
+  C.reopenRecord(s, '2026-11-05');
+  near(s.wishes[0].saved, 0);
+  eq(C.getStatus(s, t + 1000).kind, 'overtime');
+});
+
+test('提前下班只计到点击时刻', () => {
+  const s = make();
+  const res = C.clockOut(s, at(2026, 11, 5, 13, 30));
+  near(res.record.total, wage / 2);
+  near(res.record.overtime, 0);
+});
+
+test('夜班跨零点：归属开始那天，凌晨仍在工作中', () => {
+  const s = make();
+  s.schedule.shifts[0] = { id: 'day', name: '夜班', start: '22:00', end: '06:00' };
+  const st = C.getStatus(s, at(2026, 11, 6, 2));
+  eq(st.kind, 'working');
+  eq(st.inst.key, '2026-11-05');
+  near(st.earn.total, wage / 2);
+  eq(st.target, at(2026, 11, 6, 6));
+  const out = C.getStatus(s, at(2026, 11, 6, 7));
+  eq(out.kind, 'overtime');
+  C.clockOut(s, at(2026, 11, 6, 7));
+  eq(C.getStatus(s, at(2026, 11, 6, 8)).kind, 'before');
+  eq(C.getStatus(s, at(2026, 11, 6, 8)).record.key, '2026-11-05');
+});
+
+test('周末和下一次上班时间', () => {
+  const s = make();
+  const st = C.getStatus(s, at(2026, 11, 7, 12));
+  eq(st.kind, 'rest');
+  eq(st.next.key, '2026-11-09');
+  eq(st.target, at(2026, 11, 9, 9));
+});
+
+test('忘记点下班：超过时限自动补结算，只计正常工资并标记待核对', () => {
+  const s = make();
+  s.processedFrom = '2026-11-05';
+  eq(C.autoSettle(s, at(2026, 11, 6, 1, 59)).length, 0);
+  const done = C.autoSettle(s, at(2026, 11, 6, 2, 0));
+  eq(done.length, 1);
+  const r = done[0].record;
+  eq(r.key, '2026-11-05');
+  near(r.total, wage);
+  near(r.overtime, 0);
+  eq(r.auto, true);
+  eq(r.clockOut, at(2026, 11, 5, 18));
+  eq(C.unreviewedRecords(s).length, 1);
+  C.markReviewed(s);
+  eq(C.unreviewedRecords(s).length, 0);
+});
+
+test('程序关了好几天：打开时逐日补结算，而且不会重复', () => {
+  const s = make();
+  s.processedFrom = '2026-11-02';
+  const done = C.autoSettle(s, at(2026, 11, 7, 12));
+  eq(done.map((d) => d.record.key), ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06']);
+  eq(C.autoSettle(s, at(2026, 11, 7, 13)).length, 0);
+});
+
+test('首次使用当天之前的日子不会被补结算', () => {
+  const s = C.normalizeState(null, at(2026, 11, 5, 12));
+  s.salary.monthly = 8000;
+  eq(C.autoSettle(s, at(2026, 11, 5, 12)).length, 0);
+  eq(Object.keys(s.records).length, 0);
+});
+
+test('没填月薪时不补结算，填好后也不会补算之前的日子', () => {
+  const s = make();
+  s.salary.monthly = 0;
+  s.processedFrom = '2026-11-02';
+  eq(C.autoSettle(s, at(2026, 11, 6, 12)).length, 0);
+  eq(Object.keys(s.records).length, 0);
+  eq(s.processedFrom, '2026-11-05');
+  s.salary.monthly = 8000;
+  eq(C.autoSettle(s, at(2026, 11, 6, 12)).map((d) => d.record.key), ['2026-11-05']);
+});
+
+test('班次时长：普通班次和跨零点班次', () => {
+  eq(C.shiftSeconds({ start: '09:00', end: '18:00' }), 9 * 3600);
+  eq(C.shiftSeconds({ start: '22:00', end: '06:00' }), 8 * 3600);
+});
+
+test('下一班开始时，上一班即使未到时限也要自动结算', () => {
+  const s = make();
+  s.overtime.autoCloseHours = 24;
+  s.processedFrom = '2026-11-05';
+  eq(C.autoSettle(s, at(2026, 11, 6, 8, 59)).length, 0);
+  eq(C.autoSettle(s, at(2026, 11, 6, 9)).length, 1);
+  eq(C.getStatus(s, at(2026, 11, 6, 9)).inst.key, '2026-11-06');
+});
+
+test('修改下班时间：金额和心愿同步调整', () => {
+  const s = make();
+  C.addWish(s, { name: 'A', budget: 100000 }, BASE);
+  s.processedFrom = '2026-11-05';
+  C.autoSettle(s, at(2026, 11, 6, 2));
+  near(s.wishes[0].saved, wage);
+  const rev = C.reviseRecord(s, '2026-11-05', at(2026, 11, 5, 20), BASE);
+  near(rev.record.overtime, ((wage / 9) * 1.5) * 2);
+  near(s.wishes[0].saved, rev.record.total);
+  eq(rev.record.auto, false);
+  C.voidRecord(s, '2026-11-05');
+  near(s.wishes[0].saved, 0);
+  eq(C.monthStats(s, 2026, 10).attended, 0);
+  eq(C.autoSettle(s, at(2026, 11, 6, 3)).length, 0);
+});
+
+test('心愿：按队列存入，溢出给下一个，全满进余额', () => {
+  const s = make();
+  C.addWish(s, { name: 'A', budget: 100 }, BASE);
+  C.addWish(s, { name: 'B', budget: 200 }, BASE);
+  const r1 = C.allocate(s, 150, BASE);
+  eq(s.wishes.map((w) => w.saved), [100, 50]);
+  eq(r1.filled.map((w) => w.name), ['A']);
+  const r2 = C.allocate(s, 500, BASE);
+  eq(s.wishes.map((w) => w.saved), [100, 200]);
+  near(s.wishSurplus, 350);
+  eq(r2.filled.map((w) => w.name), ['B']);
+  const { wish } = C.addWish(s, { name: 'C', budget: 300 }, BASE);
+  near(wish.saved, 300);
+  near(s.wishSurplus, 50);
+});
+
+test('存入比例：只有设定比例的收入进心愿', () => {
+  const s = make();
+  s.wishShare = 25;
+  s.overtime.mode = 'none';
+  C.addWish(s, { name: 'A', budget: 100000 }, BASE);
+  C.clockOut(s, at(2026, 11, 5, 18));
+  near(s.wishes[0].saved, wage * 0.25);
+});
+
+test('调顺序：首位变化且原首位有进度时要询问', () => {
+  const s = make();
+  const a = C.addWish(s, { name: 'A', budget: 100 }, BASE).wish;
+  const b = C.addWish(s, { name: 'B', budget: 100 }, BASE).wish;
+  const c = C.addWish(s, { name: 'C', budget: 100 }, BASE).wish;
+  a.saved = 40;
+  const plan = C.planWishMove(s, c.id, 0);
+  eq(plan.choice.subjectName, 'A');
+  eq(plan.choice.targetName, 'C');
+  near(plan.choice.amount, 40);
+  eq(C.planWishMove(s, a.id, 0).changed, false);
+  a.saved = 0;
+  eq(C.planWishMove(s, c.id, 0).choice, null);
+  eq(b.saved, 0);
+});
+
+test('调顺序：选择进度跟随原心愿', () => {
+  const s = make();
+  const a = C.addWish(s, { name: 'A', budget: 100 }, BASE).wish;
+  const b = C.addWish(s, { name: 'B', budget: 100 }, BASE).wish;
+  a.saved = 40;
+  C.applyWishMove(s, b.id, 0, 'keep', BASE);
+  eq(s.wishes.map((w) => w.name), ['B', 'A']);
+  eq([b.saved, a.saved], [0, 40]);
+  C.allocate(s, 10, BASE);
+  eq([b.saved, a.saved], [10, 40]);
+});
+
+test('调顺序：选择把进度转给新首位', () => {
+  const s = make();
+  const a = C.addWish(s, { name: 'A', budget: 100 }, BASE).wish;
+  const b = C.addWish(s, { name: 'B', budget: 100 }, BASE).wish;
+  a.saved = 40;
+  C.applyWishMove(s, b.id, 0, 'transfer', BASE);
+  eq(s.wishes.map((w) => w.name), ['B', 'A']);
+  eq([b.saved, a.saved], [40, 0]);
+});
+
+test('调顺序：转移金额超过新心愿预算时溢出给后面的心愿', () => {
+  const s = make();
+  const a = C.addWish(s, { name: 'A', budget: 100 }, BASE).wish;
+  const b = C.addWish(s, { name: 'B', budget: 30 }, BASE).wish;
+  a.saved = 80;
+  const filled = C.applyWishMove(s, b.id, 0, 'transfer', BASE);
+  eq(filled.map((w) => w.name), ['B']);
+  eq([b.saved, a.saved], [30, 50]);
+});
+
+test('调顺序：把有进度的非首位心愿往后挪，也可以把进度交给接替者', () => {
+  const s = make();
+  C.addWish(s, { name: 'A', budget: 100 }, BASE);
+  const b = C.addWish(s, { name: 'B', budget: 100 }, BASE).wish;
+  const c = C.addWish(s, { name: 'C', budget: 100 }, BASE).wish;
+  b.saved = 20;
+  const plan = C.planWishMove(s, b.id, 2);
+  eq(plan.choice.subjectName, 'B');
+  eq(plan.choice.targetName, 'C');
+  C.applyWishMove(s, b.id, 2, 'transfer', BASE);
+  eq(s.wishes.map((w) => w.name), ['A', 'C', 'B']);
+  eq([c.saved, b.saved], [20, 0]);
+});
+
+test('调顺序：把非首位往前挪但没动首位，不需要询问', () => {
+  const s = make();
+  C.addWish(s, { name: 'A', budget: 100 }, BASE);
+  C.addWish(s, { name: 'B', budget: 100 }, BASE);
+  const c = C.addWish(s, { name: 'C', budget: 100 }, BASE).wish;
+  c.saved = 20;
+  eq(C.planWishMove(s, c.id, 1).choice, null);
+});
+
+test('删除心愿：可以转给下一个，也可以直接清掉', () => {
+  const s = make();
+  const a = C.addWish(s, { name: 'A', budget: 100 }, BASE).wish;
+  const b = C.addWish(s, { name: 'B', budget: 100 }, BASE).wish;
+  a.saved = 40;
+  C.removeWish(s, a.id, 'transfer', BASE);
+  near(b.saved, 40);
+  C.removeWish(s, b.id, 'drop', BASE);
+  eq(s.wishes.length, 0);
+  near(s.wishSurplus, 0);
+});
+
+test('编辑心愿：预算改小后多余的钱流向下一个，改大后回到队列', () => {
+  const s = make();
+  const a = C.addWish(s, { name: 'A', budget: 100 }, BASE).wish;
+  const b = C.addWish(s, { name: 'B', budget: 100 }, BASE).wish;
+  a.saved = 80;
+  const filled = C.updateWish(s, a.id, { budget: 50 }, BASE);
+  eq(filled.map((w) => w.name), ['A']);
+  eq([a.saved, b.saved], [50, 30]);
+  eq(C.filledWishes(s).length, 1);
+  C.updateWish(s, a.id, { budget: 90 }, BASE);
+  eq(C.filledWishes(s).length, 0);
+  eq(a.filledAt, null);
+  eq(C.activeWishes(s).length, 2);
+});
+
+test('实时预览不入账，今天的收入先算到首位心愿上', () => {
+  const s = make();
+  const a = C.addWish(s, { name: 'A', budget: 100 }, BASE).wish;
+  const prev = C.previewWishes(s, 120);
+  eq(prev.items[0].saved, 100);
+  near(prev.surplus, 20);
+  eq(a.saved, 0);
+});
+
+test('心愿预测：还需工作时长、班数和预计日期', () => {
+  const s = make();
+  s.salary.monthly = 2100; // 11 月 21 天，日薪 100，班次 9 小时
+  C.addWish(s, { name: 'A', budget: 250 }, BASE);
+  const now = at(2026, 11, 5, 9);
+  const st = C.getStatus(s, now);
+  const f = C.forecastWishes(s, now, st);
+  const it = f.items[0];
+  eq(it.reachable, true);
+  near(it.workSeconds, 2.5 * 9 * 3600, 'work', 0.01);
+  eq(it.shifts, 3);
+  // 周四 周五 周一，第三班进行到一半
+  eq(it.eta, at(2026, 11, 9, 13, 30));
+});
+
+test('心愿预测：工作中剩余时长每秒减少', () => {
+  const s = make();
+  s.salary.monthly = 2100;
+  C.addWish(s, { name: 'A', budget: 250 }, BASE);
+  const t1 = at(2026, 11, 5, 10);
+  const t2 = t1 + 1000;
+  const a = C.forecastWishes(s, t1, C.getStatus(s, t1)).items[0].workSeconds;
+  const b = C.forecastWishes(s, t2, C.getStatus(s, t2)).items[0].workSeconds;
+  near(a - b, 1, 'tick', 1e-6);
+});
+
+test('心愿预测：存入比例减半，时长翻倍', () => {
+  const s = make();
+  s.salary.monthly = 2100;
+  s.wishShare = 50;
+  C.addWish(s, { name: 'A', budget: 100 }, BASE);
+  const now = at(2026, 11, 5, 9);
+  near(C.forecastWishes(s, now, C.getStatus(s, now)).items[0].workSeconds, 2 * 9 * 3600, 'half', 0.01);
+});
+
+test('心愿预测：队列后面的心愿要累计前面的时长', () => {
+  const s = make();
+  s.salary.monthly = 2100;
+  C.addWish(s, { name: 'A', budget: 100 }, BASE);
+  C.addWish(s, { name: 'B', budget: 100 }, BASE);
+  const now = at(2026, 11, 5, 9);
+  const items = C.forecastWishes(s, now, C.getStatus(s, now)).items;
+  near(items[0].workSeconds, 9 * 3600, 'A', 0.01);
+  near(items[1].workSeconds, 18 * 3600, 'B', 0.01);
+  eq(C.forecastWishes(s, now, C.getStatus(s, now), 1).items[1].reachable, false);
+});
+
+test('心愿预测：今天已结算时不再把今天算进去', () => {
+  const s = make();
+  s.salary.monthly = 2100;
+  s.overtime.mode = 'none';
+  C.addWish(s, { name: 'A', budget: 1000 }, BASE);
+  C.clockOut(s, at(2026, 11, 5, 18));
+  const now = at(2026, 11, 5, 18, 1);
+  const it = C.forecastWishes(s, now, C.getStatus(s, now)).items[0];
+  near(it.workSeconds, 9 * 9 * 3600, 'rest', 0.01);
+});
+
+test('心愿预测：按月排班时未排班的月份沿用最近的安排并标记估算', () => {
+  const s = make();
+  s.salary.monthly = 1000;
+  s.schedule.mode = 'monthly';
+  [3, 10, 17, 24].forEach((d) => C.toggleDay(s, new Date(2026, 10, d), 'day'));
+  C.addWish(s, { name: 'A', budget: 600 }, BASE);
+  const now = at(2026, 11, 1, 8);
+  const it = C.forecastWishes(s, now, C.getStatus(s, now)).items[0];
+  eq(it.reachable, true);
+  eq(it.shifts, 3);
+  const big = C.addWish(s, { name: 'B', budget: 1000 }, BASE).wish;
+  const items = C.forecastWishes(s, now, C.getStatus(s, now)).items;
+  eq(items[0].projected, false);
+  eq(items[1].projected, true);
+  eq(new Date(items[1].eta).getMonth(), 11);
+  eq(big.saved, 0);
+});
+
+test('心愿预测：缺月薪、比例为 0、没有排班时给出原因', () => {
+  const s = make();
+  C.addWish(s, { name: 'A', budget: 100 }, BASE);
+  const now = at(2026, 11, 5, 9);
+  s.salary.monthly = 0;
+  eq(C.forecastWishes(s, now, C.getStatus(s, now)).blocked, 'no-salary');
+  s.salary.monthly = 8000;
+  s.wishShare = 0;
+  eq(C.forecastWishes(s, now, C.getStatus(s, now)).blocked, 'no-share');
+  s.wishShare = 100;
+  s.schedule.weekly = {};
+  const f = C.forecastWishes(s, now, C.getStatus(s, now));
+  eq(f.blocked, null);
+  eq(f.items[0].reachable, false);
+});
+
+test('多班次：每天可以排不同班次，时薪随班次长度变化', () => {
+  const s = make();
+  const night = C.addShift(s, { name: '晚班', start: '20:00', end: '00:00' });
+  s.schedule.mode = 'monthly';
+  C.toggleDay(s, new Date(2026, 10, 3), 'day');
+  C.toggleDay(s, new Date(2026, 10, 4), night.id);
+  near(C.dailyWage(s, new Date(2026, 10, 4)), 4000);
+  const st = C.getStatus(s, at(2026, 11, 4, 22));
+  eq(st.kind, 'working');
+  near(st.earn.total, 2000);
+  C.toggleDay(s, new Date(2026, 10, 4), 'day');
+  eq(C.shiftIdFor(s.schedule, new Date(2026, 10, 4)), 'day');
+});
+
+test('删除班次：已排好的日子改用剩余班次，最后一个不能删', () => {
+  const s = make();
+  const night = C.addShift(s, { name: '晚班', start: '20:00', end: '23:00' });
+  s.schedule.weekly[6] = night.id;
+  eq(C.removeShift(s, night.id), true);
+  eq(s.schedule.weekly[6], 'day');
+  eq(C.removeShift(s, 'day'), false);
+});
+
+test('按月快捷操作：填工作日、复制上月、清空', () => {
+  const s = make();
+  s.schedule.mode = 'monthly';
+  C.fillMonthWeekdays(s, 2026, 10, 'day');
+  eq(C.workDayCount(s.schedule, 2026, 10), 21);
+  eq(C.copyPreviousMonth(s, 2026, 11), true);
+  eq(s.schedule.monthly['2026-12']['2'], 'day');
+  C.clearMonth(s, 2026, 10);
+  eq(C.workDayCount(s.schedule, 2026, 10), 0);
+  eq(C.copyPreviousMonth(s, 2026, 10), false);
+});
+
+test('月度统计不含作废记录', () => {
+  const s = make();
+  s.overtime.mode = 'none';
+  C.clockOut(s, at(2026, 11, 5, 18));
+  C.clockOut(s, at(2026, 11, 6, 18));
+  C.voidRecord(s, '2026-11-06');
+  const m = C.monthStats(s, 2026, 10);
+  eq(m.attended, 1);
+  near(m.earned, wage);
+  eq(m.rows.length, 2);
+  eq(m.scheduled, 21);
+});
+
+test('读档：损坏或被篡改的存档不会崩溃，也不会留下非法字段', () => {
+  const now = at(2026, 11, 5, 12);
+  eq(C.normalizeState('x', now).salary.monthly, 0);
+  const s = C.normalizeState({
+    salary: { monthly: 'abc', divisor: 'evil' },
+    overtime: { mode: 'x', autoCloseHours: 9999 },
+    schedule: {
+      mode: 'monthly',
+      shifts: [{ id: 'a', name: 123, start: 'bad', end: '18:00' }, { id: 'b', name: 'x'.repeat(99), start: '09:00', end: '18:00' }],
+      weekly: { 1: 'gone', 2: 'b' },
+      monthly: { '2026-11': { 3: 'b', 4: 'gone', 99: 'b' }, nope: { 1: 'b' } },
+      exceptions: { '2026-11-05': 'gone', bad: 'off' },
+    },
+    records: { bad: {}, '2026-11-01': { start: 'x', end: 1 }, '2026-11-02': { start: 1, end: 2, total: -5, alloc: [{ id: 3 }] } },
+    wishes: [{ id: 'w', name: '<img src=x onerror=alert(1)>', budget: 10, saved: 'x' }, { id: 'z', budget: -1 }, 'junk'],
+    wishShare: 900,
+    ui: { view: 'hack', tab: 'hack' },
+  }, now);
+  eq(s.salary.monthly, 0);
+  eq(s.salary.divisor, 'actual');
+  eq(s.overtime.mode, 'multiplier');
+  eq(s.overtime.autoCloseHours, 24);
+  eq(s.schedule.shifts.map((x) => x.id), ['b']);
+  eq(s.schedule.shifts[0].name.length, 12);
+  eq(s.schedule.weekly, { 2: 'b' });
+  eq(s.schedule.monthly, { '2026-11': { 3: 'b' } });
+  eq(s.schedule.exceptions, {});
+  eq(Object.keys(s.records), ['2026-11-02']);
+  eq(s.records['2026-11-02'].total, 0);
+  eq(s.records['2026-11-02'].alloc, []);
+  eq(s.wishes.length, 1);
+  eq(s.wishes[0].saved, 0);
+  eq(s.wishShare, 100);
+  eq(s.ui.view, 'card');
+});
+
+test('读档：存档读回来和原来一致', () => {
+  const s = make();
+  C.addWish(s, { name: 'A', budget: 100 }, BASE);
+  C.clockOut(s, at(2026, 11, 5, 18));
+  const copy = C.normalizeState(JSON.parse(JSON.stringify(s)), BASE);
+  eq(copy, s);
+});
+
+test('文本格式', () => {
+  eq(C.fmtMoney(1234567.891), '1,234,567.89');
+  eq(C.fmtMoney(0.5, 4), '0.5000');
+  eq(C.fmtMoney(1000, 0), '1,000');
+  eq(C.fmtDuration(3661), '01:01:01');
+  eq(C.fmtCountdown(90061000), '1天 01:01:01');
+  eq(C.fmtCountdown(500), '00:00:01');
+  eq(C.fmtWork(3661), '1小时01分01秒');
+  eq(C.fmtWork(61), '1分01秒');
+  eq(C.fmtWork(9.2), '10秒');
+  eq(C.fmtDate(at(2026, 11, 5)), '11月5日 周四');
+  eq(C.fmtEta(at(2026, 12, 1), at(2026, 11, 5)), '12月1日');
+  eq(C.fmtEta(at(2027, 1, 2), at(2026, 11, 5)), '2027年1月2日');
+});
+
+/* ---------- 午休 ---------- */
+test('午休：默认班次带午休，计薪工时扣掉午休', () => {
+  const d = C.defaultState(BASE);
+  eq(C.shiftSeconds(d.schedule.shifts[0]), 8 * 3600);
+  eq(C.breakOffsets(d.schedule.shifts[0]), { from: 180, to: 240 });
+});
+
+test('午休：不在上下班时间内的午休不生效', () => {
+  const shift = { start: '09:00', end: '18:00', breakStart: '19:00', breakEnd: '20:00' };
+  eq(C.breakOffsets(shift), null);
+  eq(C.shiftSeconds(shift), 9 * 3600);
+  eq(C.breakOffsets({ start: '09:00', end: '18:00', breakStart: '13:00', breakEnd: '12:00' }), null);
+  eq(C.breakOffsets({ start: '09:00', end: '18:00', breakStart: null, breakEnd: null }), null);
+});
+
+test('午休：夜班的午休可以跨零点', () => {
+  const shift = { start: '22:00', end: '06:00', breakStart: '23:30', breakEnd: '00:30' };
+  eq(C.breakOffsets(shift), { from: 90, to: 150 });
+  eq(C.shiftSeconds(shift), 7 * 3600);
+});
+
+test('午休：每秒金额按 8 小时算，午休期间金额不动', () => {
+  const s = makeLunch();
+  const am = C.getStatus(s, at(2026, 11, 5, 11));
+  eq(am.kind, 'working');
+  near(am.earn.rate, wage / (8 * 3600), 'rate', 1e-9);
+  near(am.earn.total, hourly8 * 2);
+  const lunchStart = C.getStatus(s, at(2026, 11, 5, 12));
+  const lunchEnd = C.getStatus(s, at(2026, 11, 5, 12, 59, 59));
+  eq(lunchStart.kind, 'lunch');
+  eq(lunchEnd.kind, 'lunch');
+  near(lunchStart.earn.total, hourly8 * 3);
+  near(lunchEnd.earn.total, hourly8 * 3);
+  eq(lunchStart.target, at(2026, 11, 5, 13));
+  const pm = C.getStatus(s, at(2026, 11, 5, 15));
+  eq(pm.kind, 'working');
+  near(pm.earn.total, hourly8 * 5);
+  eq(pm.target, at(2026, 11, 5, 18));
+});
+
+test('午休：下班时正好拿满日薪，进度按工时而不是墙钟', () => {
+  const s = makeLunch();
+  near(C.getStatus(s, at(2026, 11, 5, 18)).earn.total, wage);
+  near(C.getStatus(s, at(2026, 11, 5, 12, 30)).progress, 3 / 8);
+});
+
+test('午休：加班费倍率基于扣掉午休后的时薪', () => {
+  const s = makeLunch();
+  near(C.getStatus(s, at(2026, 11, 5, 19)).earn.overtime, hourly8 * 1.5);
+});
+
+test('午休：心愿预测跳过午休，只数工作时间', () => {
+  const s = makeLunch();
+  s.salary.monthly = 2100; // 日薪 100，每小时 12.5
+  C.addWish(s, { name: 'A', budget: 50 }, BASE); // 需要 4 小时
+  const now = at(2026, 11, 5, 9);
+  const it = C.forecastWishes(s, now, C.getStatus(s, now)).items[0];
+  near(it.workSeconds, 4 * 3600, 'work', 0.01);
+  eq(it.eta, at(2026, 11, 5, 14)); // 9-12 三小时，午休，13-14 一小时
+});
+
+test('午休：午休中预测仍从下午继续', () => {
+  const s = makeLunch();
+  s.salary.monthly = 2100;
+  C.addWish(s, { name: 'A', budget: 100 }, BASE);
+  const now = at(2026, 11, 5, 12, 30);
+  const st = C.getStatus(s, now);
+  const it = C.forecastWishes(s, now, st).items[0];
+  near(it.workSeconds, 5 * 3600, 'rest of day', 0.01);
+  eq(it.eta, at(2026, 11, 5, 18));
+});
+
+/* ---------- 请假和假期 ---------- */
+const brush = (type, half) => ({ kind: 'mark', type, half: half || null });
+const nov5 = new Date(2026, 10, 5);
+
+test('事假：全天 0%，当月排班天数不变，少拿的就是这一天', () => {
+  const s = makeLunch();
+  s.processedFrom = '2026-11-05';
+  C.applyBrush(s, nov5, brush('personal'), BASE);
+  eq(C.workDayCount(s.schedule, 2026, 10), 21);
+  near(C.dailyWage(s, new Date(2026, 10, 6)), wage);
+  const st = C.getStatus(s, at(2026, 11, 5, 10));
+  eq(st.kind, 'leave');
+  near(st.earn.total, 0);
+  eq(st.next.key, '2026-11-06');
+  eq(st.target, at(2026, 11, 6, 9));
+});
+
+test('病假：按手填比例计薪，全天休假到点自动入账且不算忘记', () => {
+  const s = makeLunch();
+  s.processedFrom = '2026-11-05';
+  s.leave.sick = 60;
+  C.addWish(s, { name: 'A', budget: 100000 }, BASE);
+  C.applyBrush(s, nov5, brush('sick'), BASE);
+  const st = C.getStatus(s, at(2026, 11, 5, 10));
+  eq(st.kind, 'leave');
+  near(st.earn.total, wage * 0.6);
+  eq(C.getStatus(s, at(2026, 11, 5, 8)).kind, 'leave');
+  near(C.getStatus(s, at(2026, 11, 5, 8)).earn.total, 0);
+  eq(C.autoSettle(s, at(2026, 11, 5, 17, 59)).length, 0);
+  const done = C.autoSettle(s, at(2026, 11, 5, 18));
+  eq(done.length, 1);
+  const r = done[0].record;
+  near(r.total, wage * 0.6);
+  near(r.leavePay, wage * 0.6);
+  near(r.normal, 0);
+  eq(r.auto, false);
+  eq(r.mark, { type: 'sick', half: null });
+  eq(C.unreviewedRecords(s).length, 0);
+  near(s.wishes[0].saved, wage * 0.6);
+  const after = C.getStatus(s, at(2026, 11, 5, 19));
+  eq(after.kind, 'leave');
+  near(C.todayEarned(after), wage * 0.6);
+});
+
+test('节假日和调休：默认 100% 带薪休息，比例可改', () => {
+  const s = makeLunch();
+  C.applyBrush(s, nov5, brush('holiday'), BASE);
+  near(C.getStatus(s, at(2026, 11, 5, 10)).earn.total, wage);
+  eq(C.getStatus(s, at(2026, 11, 5, 10)).kind, 'leave');
+  s.leave.holiday = 0;
+  near(C.getStatus(s, at(2026, 11, 5, 10)).earn.total, 0);
+  const d6 = new Date(2026, 10, 6);
+  C.applyBrush(s, d6, brush('comp'), BASE);
+  near(C.getStatus(s, at(2026, 11, 6, 10)).earn.total, wage);
+});
+
+test('节假日不能标半天', () => {
+  const s = makeLunch();
+  C.applyBrush(s, nov5, brush('holiday', 'am'), BASE);
+  eq(s.schedule.marks['2026-11-05'], { type: 'holiday', half: null });
+});
+
+test('上午请假：按午休切分，上午 3 小时按比例，下午 5 小时正常', () => {
+  const s = makeLunch();
+  s.leave.sick = 50;
+  C.applyBrush(s, nov5, brush('sick', 'am'), BASE);
+  const inst = C.instanceFor(s, nov5);
+  eq(inst.workSeconds, 5 * 3600);
+  eq(inst.leaveSeconds, 3 * 3600);
+  eq(inst.workStart, at(2026, 11, 5, 13));
+  eq(inst.workEnd, at(2026, 11, 5, 18));
+  const morning = C.getStatus(s, at(2026, 11, 5, 10));
+  eq(morning.kind, 'before');
+  eq(morning.target, at(2026, 11, 5, 13));
+  near(morning.earn.total, hourly8 * 3 * 0.5, 'leave pay counted once leave starts');
+  const pm = C.getStatus(s, at(2026, 11, 5, 15));
+  eq(pm.kind, 'working');
+  near(pm.earn.total, hourly8 * 3 * 0.5 + hourly8 * 2);
+  near(pm.progress, 2 / 5);
+  const end = C.clockOut(s, at(2026, 11, 5, 18));
+  near(end.record.normal, hourly8 * 5);
+  near(end.record.leavePay, hourly8 * 3 * 0.5);
+  near(end.record.total, hourly8 * 6.5);
+});
+
+test('下午请假：上午 3 小时正常，午休开始就算到点，下午 5 小时按比例', () => {
+  const s = makeLunch();
+  s.leave.personal = 0;
+  C.applyBrush(s, nov5, brush('personal', 'pm'), BASE);
+  const inst = C.instanceFor(s, nov5);
+  eq(inst.workEnd, at(2026, 11, 5, 12));
+  eq(C.getStatus(s, at(2026, 11, 5, 11)).kind, 'working');
+  eq(C.getStatus(s, at(2026, 11, 5, 11)).target, at(2026, 11, 5, 12));
+  const st = C.getStatus(s, at(2026, 11, 5, 12));
+  eq(st.kind, 'overtime');
+  const res = C.clockOut(s, at(2026, 11, 5, 12));
+  near(res.record.total, hourly8 * 3);
+  near(res.record.overtime, 0);
+});
+
+test('下午病假：中午点下班时，下午的假期工资也整笔入账', () => {
+  const s = makeLunch();
+  s.leave.sick = 100;
+  C.applyBrush(s, nov5, brush('sick', 'pm'), BASE);
+  const res = C.clockOut(s, at(2026, 11, 5, 12));
+  near(res.record.normal, hourly8 * 3);
+  near(res.record.leavePay, hourly8 * 5);
+  near(res.record.total, wage);
+});
+
+test('半天假：没有午休时按班次中点分上下午', () => {
+  const s = make();
+  C.applyBrush(s, nov5, brush('personal', 'am'), BASE);
+  const inst = C.instanceFor(s, nov5);
+  eq(inst.workStart, at(2026, 11, 5, 13, 30));
+  eq(inst.workSeconds, 4.5 * 3600);
+  eq(inst.leaveSeconds, 4.5 * 3600);
+});
+
+test('半天假：修改午休时间后工时跟着变', () => {
+  const s = makeLunch();
+  C.applyBrush(s, nov5, brush('sick', 'am'), BASE);
+  eq(C.instanceFor(s, nov5).leaveSeconds, 3 * 3600);
+  C.updateShift(s, 'day', { breakStart: '11:00', breakEnd: '12:00' });
+  eq(C.instanceFor(s, nov5).leaveSeconds, 2 * 3600);
+  eq(C.instanceFor(s, nov5).workSeconds, 6 * 3600);
+});
+
+test('标记：再点一次取消，换类型或换半天就替换，排班不受影响', () => {
+  const s = makeLunch();
+  C.applyBrush(s, nov5, brush('sick', 'am'), BASE);
+  C.applyBrush(s, nov5, brush('sick', 'pm'), BASE);
+  eq(s.schedule.marks['2026-11-05'], { type: 'sick', half: 'pm' });
+  C.applyBrush(s, nov5, brush('personal'), BASE);
+  eq(s.schedule.marks['2026-11-05'], { type: 'personal', half: null });
+  C.applyBrush(s, nov5, brush('personal'), BASE);
+  eq(s.schedule.marks['2026-11-05'], undefined);
+  eq(C.getStatus(s, at(2026, 11, 5, 10)).kind, 'working');
+});
+
+test('标记：没有排班的日子只做标记，提示调用方', () => {
+  const s = makeLunch();
+  const sat = new Date(2026, 10, 7);
+  const res = C.applyBrush(s, sat, brush('holiday'), BASE);
+  eq(res.noShift, true);
+  eq(C.workDayCount(s.schedule, 2026, 10), 21);
+  const st = C.getStatus(s, at(2026, 11, 7, 10));
+  eq(st.kind, 'rest');
+  eq(st.mark.type, 'holiday');
+});
+
+test('画笔：用班次点带标记的日子只清标记，不取消这一天的班', () => {
+  const s = makeLunch();
+  C.applyBrush(s, nov5, brush('sick'), BASE);
+  C.applyBrush(s, nov5, { kind: 'shift', id: 'day' }, BASE);
+  eq(s.schedule.marks['2026-11-05'], undefined);
+  eq(C.shiftIdFor(s.schedule, nov5), 'day');
+  C.applyBrush(s, nov5, { kind: 'shift', id: 'day' }, BASE);
+  eq(C.shiftIdFor(s.schedule, nov5), null);
+});
+
+test('画笔：休息会改变当月排班天数，再点恢复', () => {
+  const s = makeLunch();
+  C.applyBrush(s, nov5, { kind: 'off' }, BASE);
+  eq(C.workDayCount(s.schedule, 2026, 10), 20);
+  eq(s.schedule.exceptions['2026-11-05'], 'off');
+  C.applyBrush(s, nov5, { kind: 'off' }, BASE);
+  eq(C.workDayCount(s.schedule, 2026, 10), 21);
+  eq(s.schedule.exceptions['2026-11-05'], undefined);
+  s.schedule.mode = 'monthly';
+  C.fillMonthWeekdays(s, 2026, 10, 'day');
+  C.applyBrush(s, nov5, { kind: 'off' }, BASE);
+  eq(C.workDayCount(s.schedule, 2026, 10), 20);
+});
+
+test('已结算的日子事后标记请假：金额和心愿跟着重算，取消后恢复', () => {
+  const s = makeLunch();
+  s.overtime.mode = 'none';
+  s.leave.sick = 50;
+  C.addWish(s, { name: 'A', budget: 100000 }, BASE);
+  C.clockOut(s, at(2026, 11, 5, 18));
+  near(s.wishes[0].saved, wage);
+  C.applyBrush(s, nov5, brush('sick'), at(2026, 11, 5, 19));
+  near(s.records['2026-11-05'].total, wage * 0.5);
+  near(s.wishes[0].saved, wage * 0.5);
+  C.applyBrush(s, nov5, brush('sick'), at(2026, 11, 5, 19));
+  near(s.records['2026-11-05'].total, wage);
+  near(s.wishes[0].saved, wage);
+});
+
+test('已结算的日子改成半天假：保留原来的加班时长', () => {
+  const s = makeLunch();
+  s.leave.personal = 0;
+  C.clockOut(s, at(2026, 11, 5, 19)); // 加班 1 小时
+  C.applyBrush(s, nov5, brush('personal', 'am'), at(2026, 11, 5, 20));
+  const r = s.records['2026-11-05'];
+  eq(r.otSeconds, 3600);
+  near(r.normal, hourly8 * 5);
+  near(r.overtime, hourly8 * 1.5);
+  near(r.total, hourly8 * 6.5);
+});
+
+test('修改半天假那天的下班时间：加班从下午请假的下班点算起', () => {
+  const s = makeLunch();
+  s.leave.personal = 0;
+  C.applyBrush(s, nov5, brush('personal', 'pm'), BASE);
+  C.clockOut(s, at(2026, 11, 5, 12));
+  const rev = C.reviseRecord(s, '2026-11-05', at(2026, 11, 5, 13), BASE);
+  near(rev.record.normal, hourly8 * 3);
+  near(rev.record.overtime, hourly8 * 1.5);
+});
+
+test('心愿预测：全天事假那天不计工时，日期顺延', () => {
+  const s = makeLunch();
+  s.salary.monthly = 2100;
+  // 今天还没结算的 100 元已计入预览，还差 100 元，正好要工作一整班。
+  C.addWish(s, { name: 'A', budget: 200 }, BASE);
+  C.applyBrush(s, new Date(2026, 10, 6), brush('personal'), BASE);
+  const now = at(2026, 11, 5, 18);
+  const it = C.forecastWishes(s, now, C.getStatus(s, now)).items[0];
+  near(it.workSeconds, 8 * 3600, 'one shift', 0.01);
+  eq(it.eta, at(2026, 11, 9, 18));
+});
+
+test('心愿预测：带薪病假的钱也算进去，但不算工时', () => {
+  const s = makeLunch();
+  s.salary.monthly = 2100;
+  s.leave.sick = 50;
+  // 今天 100 + 周五病假 50，还差 50 元，也就是 4 个工时：上午 3 小时，午休后再 1 小时。
+  C.addWish(s, { name: 'A', budget: 200 }, BASE);
+  C.applyBrush(s, new Date(2026, 10, 6), brush('sick'), BASE);
+  const now = at(2026, 11, 5, 18);
+  const it = C.forecastWishes(s, now, C.getStatus(s, now)).items[0];
+  near(it.workSeconds, 4 * 3600, 'half shift of work', 0.01);
+  eq(it.eta, at(2026, 11, 9, 14));
+});
+
+test('半天工时：按午休切分，没有午休时对半分', () => {
+  eq(C.shiftHalves({ start: '09:00', end: '18:00', breakStart: '12:00', breakEnd: '13:00' }), { am: 3, pm: 5 });
+  eq(C.shiftHalves({ start: '09:00', end: '18:00', breakStart: '11:30', breakEnd: '13:00' }), { am: 2.5, pm: 5 });
+  eq(C.shiftHalves({ start: '09:00', end: '18:00', breakStart: null, breakEnd: null }), { am: 4.5, pm: 4.5 });
+});
+
+test('建议午休：12 点能放下就用 12 点，夜班放在中间', () => {
+  eq(C.suggestBreak({ start: '09:00', end: '18:00' }), { breakStart: '12:00', breakEnd: '13:00' });
+  eq(C.suggestBreak({ start: '22:00', end: '06:00' }), { breakStart: '01:30', breakEnd: '02:30' });
+  const short = C.suggestBreak({ start: '20:00', end: '20:30' });
+  eq(short, { breakStart: null, breakEnd: null });
+});
+
+test('月度请假天数：半天算 0.5，节假日和没排班的日子不算', () => {
+  const s = makeLunch();
+  C.applyBrush(s, new Date(2026, 10, 3), brush('sick', 'am'), BASE);
+  C.applyBrush(s, new Date(2026, 10, 4), brush('personal'), BASE);
+  C.applyBrush(s, new Date(2026, 10, 5), brush('holiday'), BASE);
+  C.applyBrush(s, new Date(2026, 10, 7), brush('sick'), BASE);
+  eq(C.monthLeaveDays(s, 2026, 10), 1.5);
+});
+
+/* ---------- 一键核算 ---------- */
+test('一键核算：5 号时从 1 号累计，没有记录的排班日按排班补算', () => {
+  const s = makeLunch();
+  s.processedFrom = '2026-11-05';
+  s.overtime.mode = 'none';
+  const now = at(2026, 11, 5, 13);
+  const st = C.getStatus(s, now);
+  const r = C.monthReckon(s, 2026, 10, now, st);
+  eq(r.estimatedDays, 3); // 2、3、4 号
+  near(r.estimated, wage * 3);
+  near(r.live, hourly8 * 3); // 今天上午 3 小时
+  near(r.settled, 0);
+  near(r.total, wage * 3 + hourly8 * 3);
+  eq(Object.keys(s.records).length, 0, 'does not write records');
+});
+
+test('一键核算：已结算用实际金额（含加班），事假和作废不补算', () => {
+  const s = makeLunch();
+  s.processedFrom = '2026-11-02';
+  s.leave.personal = 0;
+  C.clockOut(s, at(2026, 11, 2, 19)); // 2 号加班 1 小时
+  C.clockOut(s, at(2026, 11, 3, 18));
+  C.voidRecord(s, '2026-11-03');
+  C.applyBrush(s, new Date(2026, 10, 4), brush('personal'), at(2026, 11, 4, 8));
+  const now = at(2026, 11, 5, 8);
+  const r = C.monthReckon(s, 2026, 10, now, C.getStatus(s, now));
+  near(r.settled, wage + hourly8 * 1.5);
+  near(r.estimated, 0);
+  eq(r.estimatedDays, 0);
+  near(r.total, wage + hourly8 * 1.5);
+});
+
+test('一键核算：带薪病假按比例补算，半天假按工时补算', () => {
+  const s = makeLunch();
+  s.processedFrom = '2026-11-05';
+  s.leave.sick = 50;
+  C.applyBrush(s, new Date(2026, 10, 2), brush('sick'), BASE);
+  C.applyBrush(s, new Date(2026, 10, 3), brush('sick', 'am'), BASE);
+  C.applyBrush(s, new Date(2026, 10, 4), { kind: 'off' }, BASE);
+  const now = at(2026, 11, 5, 8);
+  const r = C.monthReckon(s, 2026, 10, now, C.getStatus(s, now));
+  // 4 号改成休息后当月 20 天，日薪变成 400，每小时 50
+  near(r.estimated, 400 * 0.5 + (50 * 5 + 50 * 3 * 0.5));
+  eq(r.estimatedDays, 2);
+});
+
+test('一键核算：过去的月份算整月，未来的月份是 0', () => {
+  const s = makeLunch();
+  const now = at(2026, 11, 5, 8);
+  const st = C.getStatus(s, now);
+  near(C.monthReckon(s, 2026, 9, now, st).total, 8000); // 10 月 22 天正好等于月薪
+  near(C.monthReckon(s, 2026, 11, now, st).total, 0);
+});
+
+/* ---------- 兼容旧版存档 ---------- */
+test('旧存档：没有午休和标记字段也能读，金额和之前一样', () => {
+  const now = at(2026, 11, 6, 8);
+  const old = {
+    version: 1,
+    createdAt: at(2026, 11, 5, 8),
+    processedFrom: '2026-11-05',
+    salary: { monthly: 8000, divisor: 'actual' },
+    overtime: { mode: 'none', multiplier: 1.5, hourly: 50, autoCloseHours: 8 },
+    schedule: {
+      mode: 'weekly',
+      shifts: [{ id: 'day', name: '白班', start: '09:00', end: '18:00' }],
+      weekly: { 1: 'day', 2: 'day', 3: 'day', 4: 'day', 5: 'day' },
+      monthly: {},
+      exceptions: {},
+    },
+    records: {
+      '2026-11-05': { key: '2026-11-05', shiftName: '白班', start: at(2026, 11, 5, 9), end: at(2026, 11, 5, 18), clockOut: at(2026, 11, 5, 18), wage, normal: wage, overtime: 0, otSeconds: 0, total: wage, auto: false, reviewed: true, voided: false, alloc: [] },
+    },
+    wishes: [],
+    wishSurplus: 0,
+    wishShare: 100,
+    ui: { pinned: true, view: 'card', tab: 'settings', hideMoney: false, sound: true, trayHintShown: true },
+  };
+  const s = C.normalizeState(old, now);
+  eq(s.schedule.shifts[0].breakStart, null);
+  eq(s.schedule.marks, {});
+  eq(s.leave, { holiday: 100, comp: 100, personal: 0, sick: 60 });
+  eq(s.ui.yieldFullscreen, true);
+  near(C.getStatus(s, at(2026, 11, 6, 13, 30)).earn.total, wage / 2);
+  const rec = s.records['2026-11-05'];
+  eq(rec.workSegs, [[at(2026, 11, 5, 9), at(2026, 11, 5, 18)]]);
+  eq(rec.paidSeconds, 9 * 3600);
+  near(C.reviseRecord(s, '2026-11-05', at(2026, 11, 5, 13, 30), now).record.total, wage / 2);
+});
+
+test('读档：非法的标记、比例和午休会被丢弃', () => {
+  const now = at(2026, 11, 5, 12);
+  const s = C.normalizeState({
+    leave: { sick: 'x', personal: -5, holiday: 9999 },
+    schedule: {
+      shifts: [{ id: 'a', name: 'x', start: '09:00', end: '18:00', breakStart: 'bad', breakEnd: '13:00' }],
+      weekly: { 1: 'a' },
+      marks: { '2026-11-05': { type: 'evil' }, '2026-11-06': { type: 'holiday', half: 'am' }, nope: { type: 'sick' }, '2026-11-09': { type: 'sick', half: 'noon' }, '2026-11-10': 'x' },
+    },
+  }, now);
+  eq(s.leave, { holiday: 300, comp: 100, personal: 0, sick: 60 });
+  eq(s.schedule.shifts[0].breakStart, null);
+  eq(s.schedule.marks, { '2026-11-06': { type: 'holiday', half: null }, '2026-11-09': { type: 'sick', half: null } });
+});
+
+test('读档：带标记和午休的存档读回来和原来一致', () => {
+  const s = makeLunch();
+  C.applyBrush(s, nov5, brush('sick', 'am'), BASE);
+  C.addWish(s, { name: 'A', budget: 100 }, BASE);
+  C.clockOut(s, at(2026, 11, 5, 18));
+  const copy = C.normalizeState(JSON.parse(JSON.stringify(s)), BASE);
+  eq(copy, s);
+});
+
+test('标记文字', () => {
+  eq(C.markText({ type: 'sick', half: null }), '病假');
+  eq(C.markText({ type: 'personal', half: 'am' }), '上午事假');
+  eq(C.markText({ type: 'comp', half: 'pm' }), '下午调休');
+  eq(C.markText(null), '');
+});
+
+const fails = results.filter((r) => r.startsWith('FAIL'));
+document.getElementById('result').textContent =
+  `${results.length - fails.length}/${results.length} passed\n${(fails.length ? fails : results).join('\n')}`;
+document.title = fails.length ? 'FAILED' : 'PASSED';
+</script>
+</body>
+</html>
